@@ -272,6 +272,26 @@ pub(crate) fn load_dense_ffn(
                 down_proj: down,
             })
         }
+        Nvfp4Variant::Bf16Raw => {
+            // PrismaQuant: float-quantized / raw BF16 — load via dense_auto()
+            // then runtime-quantize to NVFP4 so DenseFfnWeights gets QuantizedWeight.
+            let inter = if config.intermediate_size > 0 {
+                config.intermediate_size
+            } else {
+                config.moe_intermediate_size
+            };
+            let h = config.hidden_size;
+            let gate_dense = dense_auto(store, &format!("{prefix}.mlp.gate_proj.weight"), gpu)?;
+            let gate = quantize_to_nvfp4(&gate_dense, inter, h, gpu, absmax_k, quantize_k, stream)?;
+            gpu.free(gate_dense.weight)?;
+            let up_dense = dense_auto(store, &format!("{prefix}.mlp.up_proj.weight"), gpu)?;
+            let up = quantize_to_nvfp4(&up_dense, inter, h, gpu, absmax_k, quantize_k, stream)?;
+            gpu.free(up_dense.weight)?;
+            let down_dense = dense_auto(store, &format!("{prefix}.mlp.down_proj.weight"), gpu)?;
+            let down = quantize_to_nvfp4(&down_dense, h, inter, gpu, absmax_k, quantize_k, stream)?;
+            gpu.free(down_dense.weight)?;
+            Ok(DenseFfnWeights { gate_proj: gate, up_proj: up, down_proj: down })
+        }
         _ => {
             let gate = quantized_auto(store, &format!("{prefix}.mlp.gate_proj"), gpu, variant)?;
             let up = quantized_auto(store, &format!("{prefix}.mlp.up_proj"), gpu, variant)?;
