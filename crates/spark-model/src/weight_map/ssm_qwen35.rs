@@ -39,6 +39,7 @@ pub(crate) fn load_ssm_qwen35(
     gpu: &dyn GpuBackend,
     variant: Nvfp4Variant,
     qctx: Option<QuantizeCtx>,
+    h: usize,
 ) -> Result<SsmWeightsQwen35> {
     let p = format!("{layer_prefix}.linear_attn");
 
@@ -54,48 +55,34 @@ pub(crate) fn load_ssm_qwen35(
     // issue #107). The same fix in `dense_auto` covers the self_attn path.
     let load_proj = |name: &str| -> Result<DenseWeight> { dense_auto(store, name, gpu) };
 
-    // PrismaQuant: out_proj may be NVFP4 on disk (CompressedTensors variant).
-    // Dequant to BF16 since SsmWeightsQwen35.out_proj expects DenseWeight.
-    let out_proj = if matches!(
-        variant,
-        Nvfp4Variant::CompressedTensors | Nvfp4Variant::MxFp8
-    ) {
-        let Some(qctx) = qctx else {
-            anyhow::bail!(
-                "load_ssm_qwen35: out_proj is NVFP4 on disk but no QuantizeCtx provided. \
-                 PrismaQuant mixed-precision checkpoints with NVFP4 SSM out_proj require \
-                 NVFP4 quantization kernel handles (absmax_k, quantize_k, stream)."
-            );
-        };
-        let qw = quantized_any(
-            store,
-            &format!("{p}.out_proj"),
-            /*n=*/ 2048,
-            /*k=*/
-            2048,
-            gpu,
-            variant,
-            qctx,
-        )?;
-        // NVFP4 → BF16: dequant on GPU, return dense for SsmWeightsQwen35
-        let bf16 = dequant_nvfp4_to_bf16(
-            store,
-            &format!("{p}.out_proj"),
-            2048, // n = value_dim
-            2048, // k = hidden_size
-            gpu,
-        )?;
-        // Free the quantized weight — only BF16 is needed
-        gpu.free(qw.weight)?;
-        gpu.free(qw.weight_scale)?;
-        bf16
-    } else {
-        load_proj(&format!("{p}.out_proj.weight"))?
+    // PrismaQuant: SSM projections (in_proj_qkv, in_proj_z, out_proj) may be
+    // NVFP4 on disk (CompressedTensors variant). Dequant to BF16 since
+    // SsmWeightsQwen35 expects DenseWeight for all projections.
+    let load_ssm_proj = |proj_name: &str, n: usize, k: usize| -> Result<DenseWeight> {
+        if matches!(variant, Nvfp4Variant::CompressedTensors | Nvfp4Variant::MxFp8) {
+            let Some(qctx) = qctx else {
+                anyhow::bail!(
+                    "load_ssm_qwen35: {proj_name} is NVFP4 on disk but no QuantizeCtx provided."
+                );
+            };
+            let prefix = format!("{p}.{proj_name}");
+            let qw = quantized_any(store, &prefix, n, k, gpu, variant, qctx)?;
+            let bf16 = dequant_nvfp4_to_bf16(store, &prefix, n, k, gpu)?;
+            gpu.free(qw.weight)?;
+            gpu.free(qw.weight_scale)?;
+            Ok(bf16)
+        } else {
+            load_proj(&format!("{p}.{proj_name}.weight"))
+        }
     };
 
+    let value_dim = 4096usize; // linear_num_value_heads(32) × linear_value_head_dim(128)
+    let qkv_size = 6144usize; // linear_num_key_heads(16) × key_head_dim(128) × 3(Q+K+V)
+    let z_size = 2048usize; // linear_num_key_heads(16) × key_head_dim(128)
+
     Ok(SsmWeightsQwen35 {
-        in_proj_qkv: load_proj(&format!("{p}.in_proj_qkv.weight"))?,
-        in_proj_z: load_proj(&format!("{p}.in_proj_z.weight"))?,
+        in_proj_qkv: load_ssm_proj("in_proj_qkv", qkv_size, h)?,
+        in_proj_z: load_ssm_proj("in_proj_z", z_size, h)?,
         in_proj_a: dense(store, &format!("{p}.in_proj_a.weight"))?,
         in_proj_b: dense(store, &format!("{p}.in_proj_b.weight"))?,
         conv1d: dense(store, &format!("{p}.conv1d.weight"))?,
@@ -105,7 +92,7 @@ pub(crate) fn load_ssm_qwen35(
         dt_bias: dense_keep_f32(store, &format!("{p}.dt_bias"), gpu)?,
         // norm.weight is safe as BF16 (no recurrent amplification)
         norm: dense_f32_safe(store, &format!("{p}.norm.weight"), gpu)?,
-        out_proj,
+        out_proj: load_ssm_proj("out_proj", value_dim, h)?,
     })
 }
 

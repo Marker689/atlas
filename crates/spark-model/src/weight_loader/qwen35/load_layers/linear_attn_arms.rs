@@ -144,7 +144,7 @@ pub(super) fn build_linear_attention_fp8(
     //       `load_ssm_qwen35` for the `Fp8Dequanted` variant calls
     //       `dense_auto` which dequants block-scaled FP8 → BF16. We
     //       reuse that buffer for the prefill `bf16_to_fp8` path.
-    let ssm35 = load_ssm_qwen35(store, lp, gpu, variant, None)?;
+    let ssm35 = load_ssm_qwen35(store, lp, gpu, variant, None, h)?;
 
     let qkv_size = config.ssm_qkv_size();
     let z_size = config.ssm_z_size();
@@ -257,7 +257,7 @@ pub(super) fn build_linear_attention_nvfp4(
         quantize_k,
         stream,
     };
-    let ssm35 = load_ssm_qwen35(store, lp, gpu, variant, Some(qctx_nvfp4))?;
+    let ssm35 = load_ssm_qwen35(store, lp, gpu, variant, Some(qctx_nvfp4), h)?;
 
     let qkv_rows = config.ssm_qkv_size();
     let z_rows = config.ssm_z_size();

@@ -295,7 +295,7 @@ impl ModelWeightLoader for Qwen35DenseWeightLoader {
                             quantize_k,
                             stream,
                         };
-                        let ssm35 = load_ssm_qwen35(store, &lp, gpu, layer_variant, Some(qctx))?;
+                        let ssm35 = load_ssm_qwen35(store, &lp, gpu, layer_variant, Some(qctx), h)?;
                         (ssm35.in_proj_qkv, ssm35.in_proj_z, ssm35.out_proj)
                     };
 
