@@ -13,8 +13,8 @@ use crate::layers::{FfnComponent, MoeLayer, Qwen3AttentionLayer, VisionEncoder};
 use crate::quant_format::detect_quant_format;
 use crate::tp_shard::{TpShardKind, load_qkvo_tp, shard_quantized_nvfp4};
 use crate::weight_map::{
-    AttentionWeights, DenseWeight, MtpWeights, dense, detect_nvfp4_variant, load_kv_scales,
-    load_moe_no_shared, quantize_to_nvfp4, quantized_auto,
+    AttentionWeights, DenseWeight, MtpWeights, dense, detect_nvfp4_variant,
+    load_kv_scales, load_moe_no_shared, quantize_to_nvfp4, quantized_any,
 };
 
 pub struct Qwen3VLWeightLoader;
@@ -52,6 +52,12 @@ impl ModelWeightLoader for Qwen3VLWeightLoader {
         let stream = gpu.default_stream();
         let h = config.hidden_size;
 
+        let qctx = crate::weight_map::QuantizeCtx {
+            absmax_k,
+            quantize_k,
+            stream,
+        };
+
         for i in 0..config.num_hidden_layers {
             let lp = config.layer_prefix(i);
             let input_norm = dense(store, &format!("{lp}.input_layernorm.weight"))?;
@@ -61,7 +67,7 @@ impl ModelWeightLoader for Qwen3VLWeightLoader {
 
             // MoE without shared experts
             let moe_weights =
-                load_moe_no_shared(store, &lp, config.num_experts, gpu, config, layer_variant)?;
+                load_moe_no_shared(store, &lp, config.num_experts, gpu, config, layer_variant, qctx)?;
             let gate_nvfp4 = quantize_to_nvfp4(
                 &moe_weights.gate,
                 config.num_experts,
@@ -94,7 +100,15 @@ impl ModelWeightLoader for Qwen3VLWeightLoader {
                              full_k: usize,
                              kind: TpShardKind|
              -> Result<crate::weight_map::QuantizedWeight> {
-                let src = quantized_auto(store, &format!("{p}.{name}"), gpu, layer_variant)?;
+                let src = quantized_any(
+                    store,
+                    &format!("{p}.{name}"),
+                    full_n,
+                    full_k,
+                    gpu,
+                    layer_variant,
+                    qctx,
+                )?;
                 if tp_size == 1 {
                     return Ok(src);
                 }

@@ -391,6 +391,7 @@ pub(crate) fn load_moe_no_shared(
     gpu: &dyn GpuBackend,
     config: &atlas_core::config::ModelConfig,
     variant: Nvfp4Variant,
+    qctx: QuantizeCtx,
 ) -> Result<MoeWeights> {
     let p = format!("{layer_prefix}.mlp");
 
@@ -442,18 +443,32 @@ pub(crate) fn load_moe_no_shared(
     for e in 0..num_experts {
         if config.is_local_expert(e) {
             experts.push(ExpertWeight {
-                gate_proj: quantized_auto(
+                gate_proj: quantized_any(
                     store,
                     &format!("{p}.experts.{e}.gate_proj"),
+                    inter,
+                    h,
                     gpu,
                     variant,
+                    qctx,
                 )?,
-                up_proj: quantized_auto(store, &format!("{p}.experts.{e}.up_proj"), gpu, variant)?,
-                down_proj: quantized_auto(
+                up_proj: quantized_any(
+                    store,
+                    &format!("{p}.experts.{e}.up_proj"),
+                    inter,
+                    h,
+                    gpu,
+                    variant,
+                    qctx,
+                )?,
+                down_proj: quantized_any(
                     store,
                     &format!("{p}.experts.{e}.down_proj"),
+                    h,
+                    inter,
                     gpu,
                     variant,
+                    qctx,
                 )?,
             });
         } else {
