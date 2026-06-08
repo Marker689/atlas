@@ -100,7 +100,11 @@ pub fn parse_quantization_config(raw: &serde_json::Value) -> Option<Quantization
     // An empty quant_method with empty ignore list and empty groups is
     // not a real quant config — skip so callers can fall through to
     // heuristic detection.
-    if quant_method.is_empty() && quant_algo.is_empty() && ignore_modules.is_empty() && config_groups.is_empty() {
+    if quant_method.is_empty()
+        && quant_algo.is_empty()
+        && ignore_modules.is_empty()
+        && config_groups.is_empty()
+    {
         return None;
     }
 
@@ -123,7 +127,9 @@ pub fn parse_quantization_config(raw: &serde_json::Value) -> Option<Quantization
 /// `"mxfp8-quantized"`) and a `targets` array of layer-name patterns
 /// Returns `Vec<(format_name, Vec<target_pattern>)>`.
 fn parse_config_groups(qc: &serde_json::Value) -> Vec<(String, Vec<String>)> {
-    let groups_val = qc.get("config_groups")?;
+    let Some(groups_val) = qc.get("config_groups") else {
+        return Vec::new();
+    };
 
     // Format A: Array of groups (PrismaQuant style)
     if let Some(arr) = groups_val.as_array() {
@@ -141,8 +147,12 @@ fn parse_config_groups(qc: &serde_json::Value) -> Vec<(String, Vec<String>)> {
 fn parse_config_groups_array(arr: &[serde_json::Value]) -> Vec<(String, Vec<String>)> {
     let mut result: Vec<(String, Vec<String>)> = Vec::new();
     for group_val in arr {
-        let Some(group) = group_val.as_object() else { continue };
-        let Some((format, targets)) = extract_group_entry(group) else { continue };
+        let Some(group) = group_val.as_object() else {
+            continue;
+        };
+        let Some((format, targets)) = extract_group_entry(group) else {
+            continue;
+        };
         if !targets.is_empty() {
             result.push((format, targets));
         }
@@ -154,9 +164,13 @@ fn parse_config_groups_object(
     obj: &serde_json::Map<String, serde_json::Value>,
 ) -> Vec<(String, Vec<String>)> {
     let mut result: Vec<(String, Vec<String>)> = Vec::new();
-    for (_group_key, group_val) in obj.values() {
-        let Some(group) = group_val.as_object() else { continue };
-        let Some((format, targets)) = extract_group_entry(group) else { continue };
+    for group_val in obj.values() {
+        let Some(group) = group_val.as_object() else {
+            continue;
+        };
+        let Some((format, targets)) = extract_group_entry(group) else {
+            continue;
+        };
         if !targets.is_empty() {
             result.push((format, targets));
         }

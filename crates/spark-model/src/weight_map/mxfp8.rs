@@ -24,34 +24,35 @@ use super::*;
 ///   - 1 sign bit, 4 exponent bits, 3 mantissa bits
 ///   - exponent bias = 7
 ///   - no infinite / NaN (all exponent=1111 values are NaN)
-static FP8_E4M3_LUT: [f32; 256] = {
-    let mut lut = [0.0f32; 256];
-    let mut i = 0u16;
-    while i < 256 {
-        let sign = ((i >> 7) & 1) as f32;
-        let exp = ((i >> 3) & 0xF) as i32;
-        let mant = (i & 0x7) as f32;
-        let val = if exp == 0 {
-            // Subnormal
-            let s: f32 = if sign == 0.0 { 1.0 } else { -1.0 };
-            s * mant / 8.0 * 2.0f32.powi(-6)
-        } else if exp == 15 {
-            // NaN
-            f32::NAN
-        } else {
-            // Normal
-            let s: f32 = if sign == 0.0 { 1.0 } else { -1.0 };
-            s * (1.0 + mant / 8.0) * 2.0f32.powi(exp - 7)
-        };
-        lut[i as usize] = val;
-        i += 1;
-    }
-    lut
-};
+fn fp8_e4m3_lut() -> &'static [f32; 256] {
+    use std::sync::LazyLock;
+    static LUT: LazyLock<[f32; 256]> = LazyLock::new(|| {
+        let mut lut = [0.0f32; 256];
+        let mut i = 0u16;
+        while i < 256 {
+            let sign = ((i >> 7) & 1) as f32;
+            let exp = ((i >> 3) & 0xF) as i32;
+            let mant = (i & 0x7) as f32;
+            let val = if exp == 0 {
+                let s: f32 = if sign == 0.0 { 1.0 } else { -1.0 };
+                s * mant / 8.0 * 2.0f32.powi(-6)
+            } else if exp == 15 {
+                f32::NAN
+            } else {
+                let s: f32 = if sign == 0.0 { 1.0 } else { -1.0 };
+                s * (1.0 + mant / 8.0) * 2.0f32.powi(exp - 7)
+            };
+            lut[i as usize] = val;
+            i += 1;
+        }
+        lut
+    });
+    &LUT
+}
 
 /// Dequantize a single MXFP8 element: FP8 E4M3 value × E8M0 block scale.
 fn mxfp8_dequant_element(fp8_byte: u8, e8m0_byte: u8) -> f32 {
-    let fp8_val = FP8_E4M3_LUT[fp8_byte as usize];
+    let fp8_val = fp8_e4m3_lut()[fp8_byte as usize];
     if fp8_val.is_nan() || fp8_val == 0.0 {
         return 0.0;
     }
@@ -93,9 +94,7 @@ pub(crate) fn dequant_mxfp8_to_bf16(
     let num_groups = k / group_size;
 
     let fp8_size = n * k;
-    tracing::debug!(
-        "MXFP8 dequant: {prefix} shape=[{n},{k}] groups={num_groups}"
-    );
+    tracing::debug!("MXFP8 dequant: {prefix} shape=[{n},{k}] groups={num_groups}");
 
     // Download FP8 weight bytes
     let mut fp8_buf = vec![0u8; fp8_size];

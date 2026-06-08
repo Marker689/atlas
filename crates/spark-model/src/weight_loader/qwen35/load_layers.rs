@@ -134,9 +134,7 @@ pub(super) fn load_layers(
         // for uniform checkpoints it returns the base variant.
         let layer_variant = quant_format.variant_for(&lp);
         if layer_variant != variant {
-            tracing::info!(
-                "Layer {i}: per-layer variant {layer_variant:?} (global: {variant:?})"
-            );
+            tracing::info!("Layer {i}: per-layer variant {layer_variant:?} (global: {variant:?})");
         }
 
         // When native_fp8, skip NVFP4 routed experts — FP8 fused batch1/2/3

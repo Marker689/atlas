@@ -179,7 +179,9 @@ pub(crate) fn quantized_auto(
         Nvfp4Variant::MxFp8 => {
             // MXFP8 must go through quantized_any() which handles dequant+requant.
             // quantized_auto() is for direct-from-disk loading (no dequant step).
-            unreachable!("MxFp8 must use quantized_any with quant context (absmax_k, quantize_k, stream)")
+            unreachable!(
+                "MxFp8 must use quantized_any with quant context (absmax_k, quantize_k, stream)"
+            )
         }
     }
 }
@@ -216,13 +218,18 @@ pub(crate) fn quantized_any(
     // MXFP8 detection: must be CompressedTensors base variant, have FP8 weight
     // + E8M0 scale tensors, and NOT have NVFP4 packed or FP8 scale_inv.
     let is_mxfp8 = matches!(variant, Nvfp4Variant::CompressedTensors)
-        && has_scale && has_weight && !has_packed && !has_scale_inv;
+        && has_scale
+        && has_weight
+        && !has_packed
+        && !has_scale_inv;
 
     let effective_variant = if has_only_dense && !matches!(variant, Nvfp4Variant::Bf16Raw) {
         tracing::debug!("{prefix}: no quantization metadata; falling back to runtime BF16→NVFP4");
         Nvfp4Variant::Bf16Raw
     } else if is_mxfp8 {
-        tracing::debug!("{prefix}: detected MXFP8 format (CompressedTensors + weight/scale, no packed)");
+        tracing::debug!(
+            "{prefix}: detected MXFP8 format (CompressedTensors + weight/scale, no packed)"
+        );
         Nvfp4Variant::MxFp8
     } else {
         variant

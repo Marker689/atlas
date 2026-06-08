@@ -56,6 +56,15 @@ impl AllocFormat {
             Self::Bf16 => 2,
         }
     }
+
+    pub fn parse_from_str(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "nvfp4" => Some(Self::Nvfp4),
+            "mxfp8" | "mxfp8_e4m3" => Some(Self::Mxfp8),
+            "bf16" | "bfloat16" => Some(Self::Bf16),
+            _ => None,
+        }
+    }
 }
 
 /// Per-Linear sensitivity score computed from weight statistics.
@@ -106,7 +115,11 @@ pub fn compute_sensitivity_from_weights(
             }
         })
         .collect();
-    scores.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    scores.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     scores
 }
 
@@ -146,7 +159,11 @@ pub fn compute_fisher_weighted(
             }
         })
         .collect();
-    result.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    result.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     result
 }
 
@@ -199,10 +216,7 @@ pub fn promote_fused_siblings(
             let prefix = parts[2]; // "...self_attn"
             if proj == "q_proj" || proj == "k_proj" || proj == "v_proj" {
                 let group_key = format!("{}.qkv", prefix);
-                attn_groups
-                    .entry(group_key)
-                    .or_default()
-                    .push(name.clone());
+                attn_groups.entry(group_key).or_default().push(name.clone());
             }
         }
     }
@@ -407,7 +421,11 @@ pub fn allocate_knapsack(
     // Backtrack: find best valid bin within budget
     let best_b = (0..n_bins)
         .filter(|&b| dp[b].is_finite())
-        .max_by(|&a, &b| dp[a].partial_cmp(&dp[b]).unwrap_or(std::cmp::Ordering::Equal))
+        .max_by(|&a, &b| {
+            dp[a]
+                .partial_cmp(&dp[b])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
         .unwrap_or(0);
 
     let mut assignments: Vec<AllocFormat> = vec![formats[0]; sensitivities.len()];
@@ -417,8 +435,7 @@ pub fn allocate_knapsack(
         let fi = choice[layer_idx][cur];
         assignments[layer_idx] = formats[fi];
         let param_frac = sensitivities[layer_idx].n_params as f64 / total_params as f64;
-        let bits_used =
-            (formats[fi].effective_bpp() * param_frac / bit_precision).round() as usize;
+        let bits_used = (formats[fi].effective_bpp() * param_frac / bit_precision).round() as usize;
         total_bits += formats[fi].effective_bpp() * sensitivities[layer_idx].n_params as f64;
         cur = cur.saturating_sub(bits_used);
     }
@@ -473,7 +490,7 @@ pub fn allocate_with_promotion(
                 .find(|(n, _)| n == name)
                 .map(|(_, p)| *p)
                 .unwrap_or(0);
-            let fmt = AllocFormat::from_str(fmt_str).unwrap_or(AllocFormat::Nvfp4);
+            let fmt = AllocFormat::parse_from_str(fmt_str).unwrap_or(AllocFormat::Nvfp4);
             fmt.effective_bpp() * n_params as f64
         })
         .sum();
@@ -588,12 +605,30 @@ mod tests {
     #[test]
     fn fused_sibling_promotion() {
         let mut layers: BTreeMap<String, String> = BTreeMap::new();
-        layers.insert("model.layers.0.self_attn.q_proj".to_string(), "BF16".to_string());
-        layers.insert("model.layers.0.self_attn.k_proj".to_string(), "NVFP4".to_string());
-        layers.insert("model.layers.0.self_attn.v_proj".to_string(), "NVFP4".to_string());
-        layers.insert("model.layers.0.mlp.gate_proj".to_string(), "BF16".to_string());
-        layers.insert("model.layers.0.mlp.up_proj".to_string(), "MXFP8".to_string());
-        layers.insert("model.layers.0.mlp.down_proj".to_string(), "NVFP4".to_string());
+        layers.insert(
+            "model.layers.0.self_attn.q_proj".to_string(),
+            "BF16".to_string(),
+        );
+        layers.insert(
+            "model.layers.0.self_attn.k_proj".to_string(),
+            "NVFP4".to_string(),
+        );
+        layers.insert(
+            "model.layers.0.self_attn.v_proj".to_string(),
+            "NVFP4".to_string(),
+        );
+        layers.insert(
+            "model.layers.0.mlp.gate_proj".to_string(),
+            "BF16".to_string(),
+        );
+        layers.insert(
+            "model.layers.0.mlp.up_proj".to_string(),
+            "MXFP8".to_string(),
+        );
+        layers.insert(
+            "model.layers.0.mlp.down_proj".to_string(),
+            "NVFP4".to_string(),
+        );
 
         let mut rank: BTreeMap<String, usize> = BTreeMap::new();
         rank.insert("NVFP4".to_string(), 0);
@@ -604,21 +639,29 @@ mod tests {
 
         // q_proj was BF16, k_proj/v_proj were NVFP4 → all promoted to BF16
         assert_eq!(
-            promoted.get("model.layers.0.self_attn.q_proj").map(|s| s.as_str()),
+            promoted
+                .get("model.layers.0.self_attn.q_proj")
+                .map(|s| s.as_str()),
             Some("BF16")
         );
         assert_eq!(
-            promoted.get("model.layers.0.self_attn.k_proj").map(|s| s.as_str()),
+            promoted
+                .get("model.layers.0.self_attn.k_proj")
+                .map(|s| s.as_str()),
             Some("BF16")
         );
         assert_eq!(
-            promoted.get("model.layers.0.self_attn.v_proj").map(|s| s.as_str()),
+            promoted
+                .get("model.layers.0.self_attn.v_proj")
+                .map(|s| s.as_str()),
             Some("BF16")
         );
 
         // gate_proj was BF16, up_proj MXFP8, down_proj NVFP4 → all promoted to BF16
         assert_eq!(
-            promoted.get("model.layers.0.mlp.gate_proj").map(|s| s.as_str()),
+            promoted
+                .get("model.layers.0.mlp.gate_proj")
+                .map(|s| s.as_str()),
             Some("BF16")
         );
     }
@@ -646,11 +689,7 @@ mod tests {
 
     #[test]
     fn fisher_weighted_blend() {
-        let mut layers = make_layers(
-            &["l0.q_proj", "l1.q_proj"],
-            &[5.0, 1.0],
-            &[1000, 1000],
-        );
+        let mut layers = make_layers(&["l0.q_proj", "l1.q_proj"], &[5.0, 1.0], &[1000, 1000]);
         layers[0].fisher_trace = 100.0;
         layers[1].fisher_trace = 10.0;
         let blended = compute_fisher_weighted(&layers, 0.7);

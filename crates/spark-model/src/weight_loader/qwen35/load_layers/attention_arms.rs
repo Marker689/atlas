@@ -7,8 +7,8 @@
 
 use anyhow::Result;
 use atlas_core::config::ModelConfig;
-use spark_runtime::gpu::GpuBackend;
 use spark_runtime::gpu::DevicePtr;
+use spark_runtime::gpu::GpuBackend;
 use spark_runtime::kv_cache::KvCacheDtype;
 use spark_runtime::weights::WeightStore;
 
@@ -16,8 +16,8 @@ use crate::layer::TransformerLayer;
 use crate::layers::{FfnComponent, Qwen3AttentionLayer};
 use crate::tp_shard::{TpShardKind, load_qkvo_tp, shard_dense_bf16, shard_quantized_nvfp4};
 use crate::weight_map::{
-    AttentionWeights, DenseWeight, Nvfp4Variant, dense, dense_auto, dequant_mxfp8_to_bf16,
-    load_kv_scales, quantize_to_nvfp4, quantized_auto,
+    AttentionWeights, DenseWeight, Nvfp4Variant, QuantizedWeight, dense, dense_auto,
+    dequant_mxfp8_to_bf16, load_kv_scales, quantize_to_nvfp4, quantized_auto,
 };
 
 /// Build a FullAttention layer, dispatching by per-layer variant.
@@ -47,6 +47,20 @@ pub(super) fn build_full_attention_nvfp4(
     let tp_rank = config.tp_rank;
     let tp_size = config.tp_world_size.max(1);
     let i = layer_idx;
+
+    // Compute projection dimensions from config fields.
+    let num_heads = config.num_attention_heads;
+    let num_kv_heads = config.num_key_value_heads;
+    let head_dim = config.head_dim;
+    let gated = config.attn_gated;
+    let q_proj_full_n = num_heads * head_dim * (if gated { 2 } else { 1 }) / tp_size;
+    let q_proj_full_k = h / tp_size;
+    let k_proj_full_n = num_kv_heads * head_dim / tp_size;
+    let k_proj_full_k = h / tp_size;
+    let v_proj_full_n = num_kv_heads * head_dim / tp_size;
+    let v_proj_full_k = h / tp_size;
+    let o_proj_full_n = h;
+    let o_proj_full_k = num_heads * head_dim / tp_size;
 
     let (attn, q_nvfp4, k_nvfp4, v_nvfp4, _q_dense, _k_dense, _v_dense, _o_dense) = match variant {
         Nvfp4Variant::CompressedTensors => {
@@ -102,34 +116,53 @@ pub(super) fn build_full_attention_nvfp4(
                         weight: sharded_ptr,
                     };
                     let nvfp4 = quantize_to_nvfp4(
-                        &sharded,
-                        local_n,
-                        local_k,
-                        gpu,
-                        absmax_k,
-                        quantize_k,
-                        stream,
+                        &sharded, local_n, local_k, gpu, absmax_k, quantize_k, stream,
                     )?;
                     gpu.free(sharded.weight)?;
                     gpu.free(src.weight)?;
-                    Ok((DenseWeight { weight: DevicePtr::NULL }, nvfp4))
+                    Ok((
+                        DenseWeight {
+                            weight: DevicePtr::NULL,
+                        },
+                        nvfp4,
+                    ))
                 };
-            let [(q_dense, q_nv), (k_dense, k_nv), (v_dense, v_nv), (o_dense, o_nv)] =
-                load_qkvo_tp(config, load_mxfp8_then_nvfp4)?;
+            let [
+                (q_dense, q_nv),
+                (k_dense, k_nv),
+                (v_dense, v_nv),
+                (_o_dense, o_nv),
+            ] = load_qkvo_tp(config, load_mxfp8_then_nvfp4)?;
             let (k_scale, v_scale) = load_kv_scales(store, &p, gpu);
             let attn = AttentionWeights {
-                q_proj: q_dense, k_proj: k_dense, v_proj: v_dense, o_proj: o_nv,
+                q_proj: q_dense,
+                k_proj: k_dense,
+                v_proj: v_dense,
+                o_proj: o_nv,
                 q_norm: dense(store, &format!("{p}.q_norm.weight"))?,
                 k_norm: dense(store, &format!("{p}.k_norm.weight"))?,
-                q_norm_full: None, k_norm_full: None,
-                k_scale, v_scale,
+                q_norm_full: None,
+                k_norm_full: None,
+                k_scale,
+                v_scale,
             };
-            (attn, Some(q_nv), Some(k_nv), Some(v_nv), None, None, None, None)
+            (
+                attn,
+                Some(q_nv),
+                Some(k_nv),
+                Some(v_nv),
+                None,
+                None,
+                None,
+                None,
+            )
         }
         Nvfp4Variant::Bf16Raw => {
             // Bf16Raw: keep weights as dense BF16 — do NOT quantize to NVFP4.
             // This is the PrismaQuant path for layers explicitly assigned BF16.
-            tracing::info!("Layer {i}: loading attention projections as dense BF16 (no NVFP4 quant)");
+            tracing::info!(
+                "Layer {i}: loading attention projections as dense BF16 (no NVFP4 quant)"
+            );
 
             let load_bf16 = |name: &str,
                              full_n: usize,
@@ -147,10 +180,30 @@ pub(super) fn build_full_attention_nvfp4(
                 }
                 Ok(sharded)
             };
-            let q_dense = load_bf16(&format!("{p}.q_proj"), config.q_proj_full_n(), config.q_proj_full_k(), TpShardKind::Column)?;
-            let k_dense = load_bf16(&format!("{p}.k_proj"), config.k_proj_full_n(), config.k_proj_full_k(), TpShardKind::Column)?;
-            let v_dense = load_bf16(&format!("{p}.v_proj"), config.v_proj_full_n(), config.v_proj_full_k(), TpShardKind::Column)?;
-            let o_dense = load_bf16(&format!("{p}.o_proj"), config.o_proj_full_n(), config.o_proj_full_k(), TpShardKind::Row)?;
+            let q_dense = load_bf16(
+                &format!("{p}.q_proj"),
+                q_proj_full_n,
+                q_proj_full_k,
+                TpShardKind::ColumnParallel,
+            )?;
+            let k_dense = load_bf16(
+                &format!("{p}.k_proj"),
+                k_proj_full_n,
+                k_proj_full_k,
+                TpShardKind::ColumnParallel,
+            )?;
+            let v_dense = load_bf16(
+                &format!("{p}.v_proj"),
+                v_proj_full_n,
+                v_proj_full_k,
+                TpShardKind::ColumnParallel,
+            )?;
+            let o_dense = load_bf16(
+                &format!("{p}.o_proj"),
+                o_proj_full_n,
+                o_proj_full_k,
+                TpShardKind::RowParallel,
+            )?;
 
             let (k_scale, v_scale) = load_kv_scales(store, &p, gpu);
 
@@ -166,7 +219,16 @@ pub(super) fn build_full_attention_nvfp4(
                 k_scale,
                 v_scale,
             };
-            (attn, None, None, None, Some(q_dense), Some(k_dense), Some(v_dense), Some(o_dense))
+            (
+                attn,
+                None,
+                None,
+                None,
+                Some(q_dense),
+                Some(k_dense),
+                Some(v_dense),
+                Some(o_dense),
+            )
         }
         Nvfp4Variant::Standard | Nvfp4Variant::Fp8Dequanted => {
             tracing::info!("Layer {i}: loading attention projections ({variant:?})");
@@ -243,7 +305,16 @@ pub(super) fn build_full_attention_nvfp4(
                 k_scale,
                 v_scale,
             };
-            (attn, Some(q_nvfp4), Some(k_nvfp4), Some(v_nvfp4), None, None, None, None)
+            (
+                attn,
+                Some(q_nvfp4),
+                Some(k_nvfp4),
+                Some(v_nvfp4),
+                None,
+                None,
+                None,
+                None,
+            )
         }
     };
 
@@ -262,18 +333,14 @@ pub(super) fn build_full_attention_nvfp4(
         config,
     )?;
 
-    // For Bf16Raw layers, install the dense weights so the forward path
+    // For Bf16Raw layers, install the dense O weight so the forward path
     // dispatches through dense_gemm instead of quantized GEMM.
-    if let (Some(qd), Some(kd), Some(vd), Some(od)) = (_q_dense, _k_dense, _v_dense, _o_dense) {
-        layer.set_dense_weights(Some(qd), Some(kd), Some(vd), Some(od));
+    if let Some(od) = _o_dense {
+        layer.set_o_dense_bf16(od);
     }
 
     // Only transpose / predequant for quantized variants.
     if q_nvfp4.is_some() {
-        let num_heads = config.num_attention_heads;
-        let num_kv_heads = config.num_key_value_heads;
-        let head_dim = config.head_dim;
-        let gated = config.attn_gated;
         let q_proj_n = if gated {
             num_heads * head_dim * 2
         } else {
@@ -281,14 +348,16 @@ pub(super) fn build_full_attention_nvfp4(
         };
         if let Some(ref qw) = q_nvfp4 {
             let qt = qw.transpose_for_gemm(gpu, q_proj_n, h)?;
-            let kt = k_nvfp4
-                .as_ref()
-                .unwrap()
-                .transpose_for_gemm(gpu, num_kv_heads * head_dim, h)?;
-            let vt = v_nvfp4
-                .as_ref()
-                .unwrap()
-                .transpose_for_gemm(gpu, num_kv_heads * head_dim, h)?;
+            let kt =
+                k_nvfp4
+                    .as_ref()
+                    .unwrap()
+                    .transpose_for_gemm(gpu, num_kv_heads * head_dim, h)?;
+            let vt =
+                v_nvfp4
+                    .as_ref()
+                    .unwrap()
+                    .transpose_for_gemm(gpu, num_kv_heads * head_dim, h)?;
             let ot = layer
                 .attn
                 .o_proj

@@ -166,8 +166,13 @@ pub fn detect_quant_format(config: &ModelConfig, store: &WeightStore) -> Box<dyn
             Box::new(CompressedTensorsFormat::new(String::new(), ignore))
         }
         Nvfp4Variant::MxFp8 => {
-            tracing::info!("QuantFormat: mxfp8 (detected from tensor names), routing through compressed-tensors");
-            Box::new(CompressedTensorsFormat::new("mxfp8-quantized".to_string(), ignore))
+            tracing::info!(
+                "QuantFormat: mxfp8 (detected from tensor names), routing through compressed-tensors"
+            );
+            Box::new(CompressedTensorsFormat::new(
+                "mxfp8-quantized".to_string(),
+                ignore,
+            ))
         }
         Nvfp4Variant::Fp8Dequanted => {
             tracing::info!("QuantFormat: fp8-blockscaled (detected from tensor names)");

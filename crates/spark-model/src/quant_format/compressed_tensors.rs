@@ -69,7 +69,9 @@ fn format_to_variant(fmt: &str) -> Option<Nvfp4Variant> {
         Some(Nvfp4Variant::CompressedTensors)
     } else if lower.contains("mxfp8") || (lower.contains("fp8") && lower.contains("mx")) {
         Some(Nvfp4Variant::MxFp8)
-    } else if lower.contains("bf16") || lower.contains("bfloat16") || lower.contains("float-quantized")
+    } else if lower.contains("bf16")
+        || lower.contains("bfloat16")
+        || lower.contains("float-quantized")
     {
         Some(Nvfp4Variant::Bf16Raw)
     } else if lower.contains("fp8") || lower.contains("float8") {

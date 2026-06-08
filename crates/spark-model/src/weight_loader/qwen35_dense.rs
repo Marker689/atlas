@@ -98,7 +98,14 @@ impl ModelWeightLoader for Qwen35DenseWeightLoader {
 
             // Dense FFN instead of MoE
             let ffn_weights = load_dense_ffn(
-                store, &lp, gpu, layer_variant, absmax_k, quantize_k, stream, config,
+                store,
+                &lp,
+                gpu,
+                layer_variant,
+                absmax_k,
+                quantize_k,
+                stream,
+                config,
             )?;
             let ffn = FfnComponent::Dense(DenseFfnLayer::new(ffn_weights, gpu)?);
 
