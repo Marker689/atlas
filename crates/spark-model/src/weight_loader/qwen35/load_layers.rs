@@ -13,6 +13,7 @@ use spark_runtime::weights::WeightStore;
 use super::super::{ModelWeightLoader, QuantFormat, WeightFormat};
 use crate::layer::TransformerLayer;
 use crate::layers::{FfnComponent, MoeLayer, Qwen3AttentionLayer};
+use crate::quant_format::detect_quant_format;
 use crate::tp_shard::{TpShardKind, load_qkvo_tp, shard_fp8_block_scaled};
 use crate::weight_map::{
     AttentionWeights, DenseWeight, Nvfp4Variant, QuantizedWeight, dense, detect_nvfp4_variant,
@@ -71,20 +72,31 @@ pub(super) fn load_layers(
     let variant = detect_nvfp4_variant(store, config);
     let weight_format = WeightFormat::detect(store, config);
 
+    // PrismaQuant mixed-precision: detect per-layer format dispatch.
+    // `variant_for()` checks config_groups for authoritative per-layer
+    // format assignment (NVFP4/MXFP8/BF16). Falls back to `variant` for
+    // checkpoints without config_groups.
+    let quant_format = detect_quant_format(config, store);
+    tracing::info!(
+        "QuantFormat: {} (base variant: {:?})",
+        quant_format.name(),
+        quant_format.base_variant(),
+    );
+
     // Resolve runtime quantization format from the detected on-disk
     // variant. This determines which kernels are used for
     // decode/prefill/verify.
-    let quant_format = if variant == Nvfp4Variant::Fp8Dequanted {
+    let quant_format_runtime = if variant == Nvfp4Variant::Fp8Dequanted {
         QuantFormat::Fp8
     } else {
         QuantFormat::Nvfp4
     };
-    let native_fp8 = quant_format == QuantFormat::Fp8;
+    let native_fp8 = quant_format_runtime == QuantFormat::Fp8;
     tracing::info!(
         "Weight format: {:?}, NVFP4 variant: {:?}, quant_format: {:?}",
         weight_format,
         variant,
-        quant_format,
+        quant_format_runtime,
     );
 
     // Estimate MoE transpose memory: 3 projections × num_experts × (packed + scale) per layer.
@@ -116,6 +128,16 @@ pub(super) fn load_layers(
         let lp = config.layer_prefix(i);
         let input_norm = dense(store, &format!("{lp}.input_layernorm.weight"))?;
         let post_attn_norm = dense(store, &format!("{lp}.post_attention_layernorm.weight"))?;
+
+        // PrismaQuant: per-layer format dispatch from config_groups.
+        // variant_for() is authoritative for mixed-precision checkpoints;
+        // for uniform checkpoints it returns the base variant.
+        let layer_variant = quant_format.variant_for(&lp);
+        if layer_variant != variant {
+            tracing::info!(
+                "Layer {i}: per-layer variant {layer_variant:?} (global: {variant:?})"
+            );
+        }
 
         // When native_fp8, skip NVFP4 routed experts — FP8 fused batch1/2/3
         // kernels handle all MoE dispatch including MTP verify.
