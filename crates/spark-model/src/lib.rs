@@ -26,6 +26,7 @@ pub mod mistral_loader;
 pub mod model;
 pub mod precision_schedule;
 pub mod preflight;
+pub mod prismaquant;
 pub mod quant_format;
 pub mod speculative;
 pub mod tp_shard;
