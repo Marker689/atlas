@@ -75,6 +75,8 @@ pub struct PrismaAssignment {
     pub achieved_bpp: f64,
     /// Target bits per parameter
     pub target_bpp: f64,
+    /// Per-layer parameter counts for export metadata
+    pub per_layer_params: Vec<(String, usize)>,
 }
 
 /// Compute per-layer sensitivity from weight Frobenius norms.
@@ -149,6 +151,7 @@ pub fn allocate_formats(
             layers: BTreeMap::new(),
             achieved_bpp: 16.0,
             target_bpp,
+            per_layer_params: Vec::new(),
         };
     }
 
@@ -204,10 +207,16 @@ pub fn allocate_formats(
         .map(|(s, fmt)| (s.name.clone(), format!("{:?}", fmt).to_uppercase()))
         .collect();
 
+    let per_layer_params: Vec<(String, usize)> = sensitivities
+        .iter()
+        .map(|s| (s.name.clone(), s.n_params))
+        .collect();
+
     PrismaAssignment {
         layers,
         achieved_bpp,
         target_bpp,
+        per_layer_params,
     }
 }
 
@@ -229,13 +238,9 @@ pub fn write_assignment(assignment: &PrismaAssignment, output_dir: &Path) -> Res
     }
 
     let total_params: usize = assignment
-        .layers
+        .per_layer_params
         .iter()
-        .map(|(name, _)| {
-            // Count params from layer name (heuristic: Linear = in×out)
-            // Real count would come from weight tensor shapes.
-            0usize
-        })
+        .map(|(_, n)| n)
         .sum();
 
     let payload = ExportPayload {
@@ -244,7 +249,7 @@ pub fn write_assignment(assignment: &PrismaAssignment, output_dir: &Path) -> Res
         target_bpp: assignment.target_bpp,
         total_params,
         num_layers: assignment.layers.len(),
-        layer_params: Vec::new(),
+        layer_params: assignment.per_layer_params.clone(),
     };
 
     let path = output_dir.join("layer_config.json");
