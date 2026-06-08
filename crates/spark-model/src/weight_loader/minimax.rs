@@ -40,6 +40,7 @@ use spark_runtime::weights::WeightStore;
 use super::ModelWeightLoader;
 use crate::layer::TransformerLayer;
 use crate::layers::{FfnComponent, MoeLayer, Qwen3AttentionLayer};
+use crate::quant_format::detect_quant_format;
 use crate::tp_shard::{
     TpShardKind, load_qk_norms_tp, load_qkvo_tp, shard_dense_1d_bf16, shard_dense_bf16,
 };
@@ -70,6 +71,7 @@ impl ModelWeightLoader for MinimaxM2WeightLoader {
         let stream = gpu.default_stream();
         let h = config.hidden_size;
         let variant = detect_nvfp4_variant(store, config);
+        let quant_format = detect_quant_format(config, store);
         tracing::info!(
             "minimax_m2: loading {} layers, variant={:?}, hidden_size={h}",
             config.num_hidden_layers,
@@ -101,6 +103,8 @@ impl ModelWeightLoader for MinimaxM2WeightLoader {
             let input_norm = dense(store, &format!("{lp}.input_layernorm.weight"))?;
             let post_attn_norm = dense(store, &format!("{lp}.post_attention_layernorm.weight"))?;
 
+            let layer_variant = quant_format.variant_for(&lp);
+
             // ── MoE ────────────────────────────────────────────────────
             // 256 experts, no shared expert, sigmoid-routable bias loaded
             // into MoeWeights.correction_bias for M3 dispatch.
@@ -110,7 +114,7 @@ impl ModelWeightLoader for MinimaxM2WeightLoader {
                 config.num_experts,
                 gpu,
                 config,
-                variant,
+                layer_variant,
                 absmax_k,
                 quantize_k,
                 stream,

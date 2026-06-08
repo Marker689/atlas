@@ -12,6 +12,7 @@ use super::loader_b::{build_bf16_mlp, build_moe_ffn};
 use crate::layer::TransformerLayer;
 use crate::layers::dense_ffn::DenseFfnWeights;
 use crate::layers::{DenseFfnLayer, FfnActivation, FfnComponent, Qwen3AttentionLayer};
+use crate::quant_format::detect_quant_format;
 use crate::tp_shard::{TpShardKind, shard_dense_bf16};
 use crate::weight_map::{
     AttentionWeights, QuantizeCtx, dense, dense_auto, detect_nvfp4_variant, load_kv_scales,
@@ -27,6 +28,7 @@ pub(super) fn load_layers_impl(
     let mut layers: Vec<Box<dyn TransformerLayer>> = Vec::with_capacity(config.num_hidden_layers);
 
     let variant = detect_nvfp4_variant(store, config);
+    let quant_format = detect_quant_format(config, store);
     tracing::info!("Gemma-4 NVFP4 variant: {:?}", variant);
 
     let absmax_k = gpu.kernel("quantize_nvfp4", "nvfp4_global_absmax")?;
@@ -41,6 +43,7 @@ pub(super) fn load_layers_impl(
 
     for i in 0..config.num_hidden_layers {
         let lp = config.layer_prefix(i);
+        let layer_variant = quant_format.variant_for(&lp);
 
         // ── Layer norms ──
         // Gemma-4 has 4 norms: input, post_attn, pre_ffn, post_ffn.
@@ -367,7 +370,7 @@ pub(super) fn load_layers_impl(
 
         // ── MoE experts (Gemma-4 26B) — extracted to loader_b ──
         let moe_ffn = build_moe_ffn(
-            store, &lp, i, config, gpu, variant, qctx, h, absmax_k, quantize_k, stream,
+            store, &lp, i, config, gpu, layer_variant, qctx, h, absmax_k, quantize_k, stream,
         )?;
 
         tracing::info!("L{i}: building attention layer...");

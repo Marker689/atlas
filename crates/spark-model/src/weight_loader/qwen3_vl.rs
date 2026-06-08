@@ -10,6 +10,7 @@ use super::{ModelWeightLoader, WeightFormat};
 use crate::layer::TransformerLayer;
 use crate::layers::vision_encoder::{MergerLayer, ViTBlock};
 use crate::layers::{FfnComponent, MoeLayer, Qwen3AttentionLayer, VisionEncoder};
+use crate::quant_format::detect_quant_format;
 use crate::tp_shard::{TpShardKind, load_qkvo_tp, shard_quantized_nvfp4};
 use crate::weight_map::{
     AttentionWeights, DenseWeight, MtpWeights, dense, detect_nvfp4_variant, load_kv_scales,
@@ -38,6 +39,7 @@ impl ModelWeightLoader for Qwen3VLWeightLoader {
             Vec::with_capacity(config.num_hidden_layers);
 
         let variant = detect_nvfp4_variant(store, config);
+        let quant_format = detect_quant_format(config, store);
         let weight_format = WeightFormat::detect(store, config);
         tracing::info!(
             "Weight format: {:?}, NVFP4 variant: {:?}",
@@ -55,9 +57,11 @@ impl ModelWeightLoader for Qwen3VLWeightLoader {
             let input_norm = dense(store, &format!("{lp}.input_layernorm.weight"))?;
             let post_attn_norm = dense(store, &format!("{lp}.post_attention_layernorm.weight"))?;
 
+            let layer_variant = quant_format.variant_for(&lp);
+
             // MoE without shared experts
             let moe_weights =
-                load_moe_no_shared(store, &lp, config.num_experts, gpu, config, variant)?;
+                load_moe_no_shared(store, &lp, config.num_experts, gpu, config, layer_variant)?;
             let gate_nvfp4 = quantize_to_nvfp4(
                 &moe_weights.gate,
                 config.num_experts,
@@ -90,7 +94,7 @@ impl ModelWeightLoader for Qwen3VLWeightLoader {
                              full_k: usize,
                              kind: TpShardKind|
              -> Result<crate::weight_map::QuantizedWeight> {
-                let src = quantized_auto(store, &format!("{p}.{name}"), gpu, variant)?;
+                let src = quantized_auto(store, &format!("{p}.{name}"), gpu, layer_variant)?;
                 if tp_size == 1 {
                     return Ok(src);
                 }
