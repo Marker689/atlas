@@ -9,6 +9,7 @@ use spark_runtime::weights::WeightStore;
 use super::{ModelWeightLoader, WeightFormat};
 use crate::layer::TransformerLayer;
 use crate::layers::{DenseFfnLayer, FfnComponent, Qwen3AttentionLayer, Qwen3SsmLayer};
+use crate::quant_format::detect_quant_format;
 use crate::tp_shard::{TpShardKind, load_qkvo_tp, shard_dense_bf16, shard_quantized_nvfp4};
 use crate::weight_map::{
     AttentionWeights, DenseWeight, MtpWeights, Nvfp4Variant, SsmWeights, dense, dense_auto,
@@ -53,10 +54,12 @@ impl ModelWeightLoader for Qwen35DenseWeightLoader {
 
         let variant = detect_nvfp4_variant(store, config);
         let weight_format = WeightFormat::detect(store, config);
+        let quant_format = detect_quant_format(config, store);
         tracing::info!(
-            "Weight format: {:?}, NVFP4 variant: {:?}",
+            "Weight format: {:?}, NVFP4 variant: {:?}, QuantFormat: {}",
             weight_format,
-            variant
+            variant,
+            quant_format.name(),
         );
 
         // Native FP8 SSM prefill GEMM (Qwen3.6-27B-FP8 root-cause fix,
@@ -90,9 +93,12 @@ impl ModelWeightLoader for Qwen35DenseWeightLoader {
             let input_norm = dense(store, &format!("{lp}.input_layernorm.weight"))?;
             let post_attn_norm = dense(store, &format!("{lp}.post_attention_layernorm.weight"))?;
 
+            // PrismaQuant: per-layer format dispatch from config_groups.
+            let layer_variant = quant_format.variant_for(&lp);
+
             // Dense FFN instead of MoE
             let ffn_weights = load_dense_ffn(
-                store, &lp, gpu, variant, absmax_k, quantize_k, stream, config,
+                store, &lp, gpu, layer_variant, absmax_k, quantize_k, stream, config,
             )?;
             let ffn = FfnComponent::Dense(DenseFfnLayer::new(ffn_weights, gpu)?);
 
@@ -101,7 +107,7 @@ impl ModelWeightLoader for Qwen35DenseWeightLoader {
                     let p = format!("{lp}.self_attn");
                     let tp_rank = config.tp_rank;
                     let tp_size = config.tp_world_size.max(1);
-                    let (attn, q_nvfp4, k_nvfp4, v_nvfp4) = match variant {
+                    let (attn, q_nvfp4, k_nvfp4, v_nvfp4) = match layer_variant {
                         Nvfp4Variant::CompressedTensors => {
                             // NVFP4-from-disk path: column-parallel Q/K/V, row-parallel O.
                             let group_size = 16usize;
