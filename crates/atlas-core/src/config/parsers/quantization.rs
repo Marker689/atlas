@@ -203,6 +203,17 @@ fn extract_group_entry(
                     // these are regex-only, glob treats them literally.
                     let pattern = pattern.strip_prefix('^').unwrap_or(pattern);
                     let pattern = pattern.strip_suffix('$').unwrap_or(pattern);
+                    // Translate vLLM internal naming → HuggingFace naming:
+                    //   language_model.model.layers.X → model.language_model.layers.X
+                    //   language_model.lm_head → model.language_model.lm_head
+                    let pattern = pattern.replace(
+                        "language_model.model.layers",
+                        "model.language_model.layers",
+                    );
+                    let pattern = pattern.replace(
+                        "language_model.lm_head",
+                        "model.language_model.lm_head",
+                    );
                     Some(pattern.to_string())
                 })
                 .collect()
