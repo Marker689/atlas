@@ -58,21 +58,28 @@ pub(crate) fn load_ssm_qwen35(
     // PrismaQuant: SSM projections (in_proj_qkv, in_proj_z, out_proj) may be
     // NVFP4 on disk (CompressedTensors variant). Dequant to BF16 since
     // SsmWeightsQwen35 expects DenseWeight for all projections.
+    // Per-key fallback: if the tensor doesn't have NVFP4 metadata
+    // (.weight_packed or .weight + .weight_scale), treat as BF16.
     let load_ssm_proj = |proj_name: &str, n: usize, k: usize| -> Result<DenseWeight> {
-        if matches!(variant, Nvfp4Variant::CompressedTensors | Nvfp4Variant::MxFp8) {
+        let prefix = format!("{p}.{proj_name}");
+        let has_nvfp4 = store.contains(&format!("{prefix}.weight_packed"))
+            || (store.contains(&format!("{prefix}.weight"))
+                && store.contains(&format!("{prefix}.weight_scale")));
+        if matches!(variant, Nvfp4Variant::CompressedTensors | Nvfp4Variant::MxFp8)
+            && has_nvfp4
+        {
             let Some(qctx) = qctx else {
                 anyhow::bail!(
                     "load_ssm_qwen35: {proj_name} is NVFP4 on disk but no QuantizeCtx provided."
                 );
             };
-            let prefix = format!("{p}.{proj_name}");
             let qw = quantized_any(store, &prefix, n, k, gpu, variant, qctx)?;
             let bf16 = dequant_nvfp4_to_bf16(store, &prefix, n, k, gpu)?;
             gpu.free(qw.weight)?;
             gpu.free(qw.weight_scale)?;
             Ok(bf16)
         } else {
-            load_proj(&format!("{p}.{proj_name}.weight"))
+            load_proj(&format!("{prefix}.weight"))
         }
     };
 
