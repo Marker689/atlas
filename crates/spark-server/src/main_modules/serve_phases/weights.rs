@@ -84,27 +84,17 @@ pub(crate) fn auto_detect_weight_prefix(
         } else if store.contains("model.language_model.embed_tokens.weight") {
             "model.language_model".to_string()
         } else {
-            // Scan for language model prefix first — avoid vision/audio towers
+            // Scan for language model prefix — exclude vision/audio towers
             // which also have .layers.0. patterns (Gemma-4, Qwen3-VL, etc.)
             let scanned = store
                 .names()
-                .find(|k| k.contains("language_model.layers.0."))
-                .and_then(|k| k.split("language_model.layers.0.").next())
-                .map(|s| s.to_string().trim_end_matches('.').to_string())
-                .or_else(|| {
-                    store
-                        .names()
-                        .find(|k| k.contains("model.layers.0."))
-                        .and_then(|k| k.split("model.layers.0.").next())
-                        .map(|s| s.to_string().trim_end_matches('.').to_string())
+                .find(|k| {
+                    k.contains(".layers.0.")
+                        && !k.contains("vision_tower")
+                        && !k.contains("audio_tower")
                 })
-                .or_else(|| {
-                    store
-                        .names()
-                        .find(|k| k.contains(".layers.0."))
-                        .and_then(|k| k.split(".layers.0.").next())
-                        .map(|s| s.to_string())
-                });
+                .and_then(|k| k.split(".layers.0.").next())
+                .map(|s| s.to_string());
             if let Some(ref prefix) = scanned {
                 tracing::info!("Auto-detected weight prefix: '{prefix}'");
             }

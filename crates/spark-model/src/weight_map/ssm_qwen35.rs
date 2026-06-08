@@ -58,9 +58,10 @@ pub(crate) fn load_ssm_qwen35(
     // PrismaQuant: SSM projections (in_proj_qkv, in_proj_z, out_proj) may be
     // NVFP4 on disk (CompressedTensors variant). Dequant to BF16 since
     // SsmWeightsQwen35 expects DenseWeight for all projections.
-    // Per-key fallback: if the tensor doesn't have NVFP4 metadata
-    // (compressed-tensors needs weight_packed + weight_scale, standard
-    // needs weight + weight_scale), treat as BF16.
+    // Try NVFP4 dequant first; if the tensor has NVFP4 metadata on disk
+    // but the actual weight_scale/weight_packed tensor failed to load
+    // into GPU memory (fast-loader pipeline edge case), fall back to
+    // dense_auto which loads the raw .weight tensor.
     let load_ssm_proj = |proj_name: &str, n: usize, k: usize| -> Result<DenseWeight> {
         let prefix = format!("{p}.{proj_name}");
         let has_ct_nvfp4 = store.contains(&format!("{prefix}.weight_packed"))
@@ -78,11 +79,27 @@ pub(crate) fn load_ssm_qwen35(
                     "load_ssm_qwen35: {proj_name} is NVFP4 on disk but no QuantizeCtx provided."
                 );
             };
+            // Try NVFP4 dequant via quantized_any; if it falls back to
+            // Bf16Raw (per-key detection found no NVFP4 data), use the
+            // result directly. If dequant_nvfp4_to_bf16 fails, fall
+            // back to dense_auto.
             let qw = quantized_any(store, &prefix, n, k, gpu, variant, qctx)?;
-            let bf16 = dequant_nvfp4_to_bf16(store, &prefix, n, k, gpu)?;
-            gpu.free(qw.weight)?;
-            gpu.free(qw.weight_scale)?;
-            Ok(bf16)
+            match dequant_nvfp4_to_bf16(store, &prefix, n, k, gpu) {
+                Ok(bf16) => {
+                    gpu.free(qw.weight)?;
+                    gpu.free(qw.weight_scale)?;
+                    Ok(bf16)
+                }
+                Err(_) => {
+                    // NVFP4 metadata tensors failed to load — fall back
+                    gpu.free(qw.weight)?;
+                    gpu.free(qw.weight_scale)?;
+                    tracing::warn!(
+                        "load_ssm_qwen35: {proj_name} NVFP4 dequant failed, falling back to dense_auto"
+                    );
+                    load_proj(&format!("{prefix}.weight"))
+                }
+            }
         } else {
             load_proj(&format!("{prefix}.weight"))
         }
