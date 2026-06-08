@@ -274,7 +274,12 @@ impl ModelWeightLoader for Qwen35DenseWeightLoader {
                         )?;
                         (qkv, z, out)
                     } else {
-                        let ssm35 = load_ssm_qwen35(store, &lp, gpu, variant)?;
+                        let qctx = crate::weight_map::QuantizeCtx {
+                            absmax_k,
+                            quantize_k,
+                            stream,
+                        };
+                        let ssm35 = load_ssm_qwen35(store, &lp, gpu, layer_variant, Some(qctx))?;
                         (ssm35.in_proj_qkv, ssm35.in_proj_z, ssm35.out_proj)
                     };
 

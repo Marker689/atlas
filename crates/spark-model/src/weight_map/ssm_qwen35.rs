@@ -37,9 +37,8 @@ pub(crate) fn load_ssm_qwen35(
     store: &WeightStore,
     layer_prefix: &str,
     gpu: &dyn GpuBackend,
-    // Kept for loader-dispatch signature parity; `dense_auto` now routes by
-    // the projection's actual on-disk dtype rather than the model-wide variant.
-    _variant: Nvfp4Variant,
+    variant: Nvfp4Variant,
+    qctx: Option<QuantizeCtx>,
 ) -> Result<SsmWeightsQwen35> {
     let p = format!("{layer_prefix}.linear_attn");
 
@@ -55,6 +54,45 @@ pub(crate) fn load_ssm_qwen35(
     // issue #107). The same fix in `dense_auto` covers the self_attn path.
     let load_proj = |name: &str| -> Result<DenseWeight> { dense_auto(store, name, gpu) };
 
+    // PrismaQuant: out_proj may be NVFP4 on disk (CompressedTensors variant).
+    // Dequant to BF16 since SsmWeightsQwen35.out_proj expects DenseWeight.
+    let out_proj = if matches!(
+        variant,
+        Nvfp4Variant::CompressedTensors | Nvfp4Variant::MxFp8
+    ) {
+        let Some(qctx) = qctx else {
+            anyhow::bail!(
+                "load_ssm_qwen35: out_proj is NVFP4 on disk but no QuantizeCtx provided. \
+                 PrismaQuant mixed-precision checkpoints with NVFP4 SSM out_proj require \
+                 NVFP4 quantization kernel handles (absmax_k, quantize_k, stream)."
+            );
+        };
+        let qw = quantized_any(
+            store,
+            &format!("{p}.out_proj"),
+            /*n=*/ 2048,
+            /*k=*/
+            2048,
+            gpu,
+            variant,
+            qctx,
+        )?;
+        // NVFP4 → BF16: dequant on GPU, return dense for SsmWeightsQwen35
+        let bf16 = dequant_nvfp4_to_bf16(
+            store,
+            &format!("{p}.out_proj"),
+            2048, // n = value_dim
+            2048, // k = hidden_size
+            gpu,
+        )?;
+        // Free the quantized weight — only BF16 is needed
+        gpu.free(qw.weight)?;
+        gpu.free(qw.weight_scale)?;
+        bf16
+    } else {
+        load_proj(&format!("{p}.out_proj.weight"))?
+    };
+
     Ok(SsmWeightsQwen35 {
         in_proj_qkv: load_proj(&format!("{p}.in_proj_qkv.weight"))?,
         in_proj_z: load_proj(&format!("{p}.in_proj_z.weight"))?,
@@ -67,7 +105,7 @@ pub(crate) fn load_ssm_qwen35(
         dt_bias: dense_keep_f32(store, &format!("{p}.dt_bias"), gpu)?,
         // norm.weight is safe as BF16 (no recurrent amplification)
         norm: dense_f32_safe(store, &format!("{p}.norm.weight"), gpu)?,
-        out_proj: load_proj(&format!("{p}.out_proj.weight"))?,
+        out_proj,
     })
 }
 

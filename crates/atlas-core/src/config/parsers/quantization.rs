@@ -196,7 +196,13 @@ fn extract_group_entry(
             arr.iter()
                 .filter_map(|v| {
                     let s = v.as_str()?;
+                    // Strip "re:" prefix from regex patterns — Atlas
+                    // uses glob matching, not full regex.
                     let pattern = s.strip_prefix("re:").unwrap_or(s);
+                    // Strip ^ anchor (start) and $ anchor (end) —
+                    // these are regex-only, glob treats them literally.
+                    let pattern = pattern.strip_prefix('^').unwrap_or(pattern);
+                    let pattern = pattern.strip_suffix('$').unwrap_or(pattern);
                     Some(pattern.to_string())
                 })
                 .collect()
