@@ -117,8 +117,16 @@ pub fn detect_quant_format(config: &ModelConfig, store: &WeightStore) -> Box<dyn
                     ignore.len(),
                     groups_count,
                 );
-                // mixed-precision: base variant is CompressedTensors,
-                // per-tensor dispatch in quantized_any() handles MXFP8 / NVFP4 / BF16
+                // mixed-precision: if config_groups present, pass them for
+                // per-layer dispatch in variant_for(). Otherwise use plain
+                // CompressedTensorsFormat (single uniform format).
+                if groups_count > 0 {
+                    return Box::new(CompressedTensorsFormat::with_groups(
+                        format.to_string(),
+                        ignore,
+                        qc.config_groups.clone(),
+                    ));
+                }
                 return Box::new(CompressedTensorsFormat::new(format.to_string(), ignore));
             }
             "fp8" => {
