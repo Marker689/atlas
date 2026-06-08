@@ -80,7 +80,47 @@ pub(super) fn build_full_attention_nvfp4(
             };
             (attn, Some(q), Some(k), Some(v))
         }
-        Nvfp4Variant::Standard | Nvfp4Variant::Fp8Dequanted | Nvfp4Variant::Bf16Raw | Nvfp4Variant::MxFp8 => {
+        Nvfp4Variant::MxFp8 => {
+            tracing::info!("Layer {i}: loading MXFP8 attention projections");
+            let load_mxfp8_then_nvfp4 =
+                |name: &str,
+                 full_n: usize,
+                 full_k: usize,
+                 kind: TpShardKind|
+                 -> Result<(DenseWeight, crate::weight_map::QuantizedWeight)> {
+                    let full_prefix = format!("{p}.{name}");
+                    let src = dequant_mxfp8_to_bf16(store, &full_prefix, gpu)?;
+                    let (sharded_ptr, local_n, local_k) =
+                        shard_dense_bf16(src.weight, full_n, full_k, kind, tp_rank, tp_size, gpu)?;
+                    let sharded = DenseWeight {
+                        weight: sharded_ptr,
+                    };
+                    let nvfp4 = quantize_to_nvfp4(
+                        &sharded,
+                        local_n,
+                        local_k,
+                        gpu,
+                        qctx.absmax_k,
+                        qctx.quantize_k,
+                        qctx.stream,
+                    )?;
+                    gpu.free(sharded.weight)?;
+                    gpu.free(src.weight)?;
+                    Ok((DenseWeight { weight: DevicePtr::NULL }, nvfp4))
+                };
+            let [q, k, v, o] = load_qkvo_tp(config, load_mxfp8_then_nvfp4)?;
+            let dummy = DenseWeight { weight: DevicePtr::NULL };
+            let (k_scale, v_scale) = load_kv_scales(store, &p, gpu);
+            let attn = AttentionWeights {
+                q_proj: dummy, k_proj: dummy, v_proj: dummy, o_proj: o,
+                q_norm: dense(store, &format!("{p}.q_norm.weight"))?,
+                k_norm: dense(store, &format!("{p}.k_norm.weight"))?,
+                q_norm_full: None, k_norm_full: None,
+                k_scale, v_scale,
+            };
+            (attn, Some(q), Some(k), Some(v))
+        }
+        Nvfp4Variant::Standard | Nvfp4Variant::Fp8Dequanted | Nvfp4Variant::Bf16Raw => {
             tracing::info!("Layer {i}: loading attention projections ({variant:?})");
             let load_bf16_then_nvfp4 =
                 |name: &str,

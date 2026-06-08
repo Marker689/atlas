@@ -128,24 +128,23 @@ pub fn compute_sensitivity_from_weights(
 
 /// Greedy multi-choice format allocator.
 ///
-/// Assigns lower-precision formats to less-sensitive layers until
-/// the target bits-per-parameter budget is met.
+/// Assigns higher-precision formats to more-sensitive layers under
+/// a target bits-per-parameter budget.
 ///
-/// # Algorithm
-/// 1. Start with all layers at BF16 (worst compression, best quality)
-/// 2. Sort layers by sensitivity (ascending = least sensitive first)
-/// 3. For each layer, try formats from most to least aggressive:
-///    NVFP4 → MXFP8 → BF16 (keep if budget exceeded)
-/// 4. Stop when budget is met
+/// # Algorithm (bottom-up)
+/// 1. Start with all layers at the most aggressive (cheapest) format (NVFP4)
+/// 2. Sort layers by sensitivity (descending = most sensitive first)
+/// 3. For each layer, try to upgrade to the next finer format:
+///    NVFP4 → MXFP8 → BF16
+/// 4. Stop upgrading when budget is exhausted
 ///
-/// Formats: `formats` is the list of available formats in order of
-/// preference (first = most aggressive, cheapest).
+/// `formats` must be ordered from most to least aggressive (first = cheapest).
 pub fn allocate_formats(
     sensitivities: &[LayerSensitivity],
     target_bpp: f64,
     formats: &[AllocFormat],
 ) -> PrismaAssignment {
-    if sensitivities.is_empty() {
+    if sensitivities.is_empty() || formats.is_empty() {
         return PrismaAssignment {
             layers: BTreeMap::new(),
             achieved_bpp: 16.0,
@@ -153,45 +152,47 @@ pub fn allocate_formats(
         };
     }
 
-    // Sort by sensitivity ascending (least sensitive first = cheapest to quantize)
+    // Sort by sensitivity DESCENDING (most sensitive first = upgrade priority)
     let mut indices: Vec<usize> = (0..sensitivities.len()).collect();
     indices.sort_by(|&a, &b| {
-        sensitivities[a]
+        sensitivities[b]
             .score
-            .partial_cmp(&sensitivities[b].score)
+            .partial_cmp(&sensitivities[a].score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    // Default: all layers get the least aggressive format (BF16)
-    let default_fmt = formats.last().copied().unwrap_or(AllocFormat::Bf16);
-    let mut assignments: Vec<AllocFormat> = vec![default_fmt; sensitivities.len()];
+    // Start with all layers at the cheapest format
+    let cheapest = formats[0];
+    let mut assignments: Vec<AllocFormat> = vec![cheapest; sensitivities.len()];
     let total_params: usize = sensitivities.iter().map(|s| s.n_params).sum();
-
-    // Current total bits
-    let mut total_bits: f64 = sensitivities
-        .iter()
-        .map(|s| s.n_params as f64 * default_fmt.effective_bpp())
-        .sum();
     let target_bits_total = total_params as f64 * target_bpp;
 
-    // Greedy: for each layer (ascending sensitivity), try more aggressive formats
+    let mut total_bits: f64 = sensitivities
+        .iter()
+        .map(|s| s.n_params as f64 * cheapest.effective_bpp())
+        .sum();
+
+    // Upgrade most sensitive layers to higher precision until budget is met
     for &idx in &indices {
-        if total_bits <= target_bits_total {
-            break; // Budget met
+        if total_bits >= target_bits_total {
+            break; // Budget exhausted — stop upgrading
         }
         let s = &sensitivities[idx];
-        // Try formats from most to least aggressive
-        for fmt in formats.iter() {
-            let bits_saved = (assignments[idx].effective_bpp() - fmt.effective_bpp())
-                * s.n_params as f64;
-            if bits_saved <= 0.0 {
+
+        // Try formats from current to finer (skip the cheapest)
+        for fmt in formats.iter().skip(1) {
+            let bits_added =
+                (fmt.effective_bpp() - assignments[idx].effective_bpp()) * s.n_params as f64;
+            if bits_added <= 0.0 {
+                continue;
+            }
+            if total_bits + bits_added > target_bits_total {
+                // This format is too expensive — try the next one (finer granularity)
                 continue;
             }
             assignments[idx] = *fmt;
-            total_bits -= bits_saved;
-            if total_bits <= target_bits_total {
-                break;
-            }
+            total_bits += bits_added;
+            break; // Upgraded this layer, move to next
         }
     }
 
@@ -250,18 +251,18 @@ mod tests {
             &[10.0, 8.0, 5.0, 1.0],
             &[1000, 1000, 1000, 1000],
         );
+        // formats: [cheapest, ..., most expensive]
         let formats = vec![AllocFormat::Nvfp4, AllocFormat::Mxfp8, AllocFormat::Bf16];
         let result = allocate_formats(&layers, 6.0, &formats);
 
-        // l1.q_proj (score=1.0, least sensitive) should get NVFP4
-        // l0.o_proj (score=5.0) should get NVFP4
-        // l0.k_proj (score=8.0) might get MXFP8
-        // l0.q_proj (score=10.0, most sensitive) should get BF16
-
-        assert!(result.achieved_bpp <= 6.0 + 1.0); // allow some slack
-        // Most sensitive layer should be BF16
+        // Bottom-up: start all at NVFP4 (4.125 bpp), upgrade most sensitive.
+        // Most sensitive (score=10.0) → MXFP8 or BF16
+        // Medium sensitive might stay NVFP4
+        // Least sensitive (score=1.0) → stays NVFP4
+        assert!(result.achieved_bpp <= 7.0); // should be near target 6.0
+        // Most sensitive gets highest precision
         assert_eq!(result.layers.get("l0.q_proj").map(|s| s.as_str()), Some("BF16"));
-        // Least sensitive layer should be NVFP4
+        // Least sensitive stays cheapest
         assert_eq!(
             result.layers.get("l1.q_proj").map(|s| s.as_str()),
             Some("NVFP4")
