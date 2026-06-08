@@ -108,9 +108,25 @@ impl ModelWeightLoader for Qwen3WeightLoader {
 
             // ── MoE weights ──
             let moe_weights = if native_fp8 {
-                load_moe_skip_experts(store, &lp, config.num_experts, gpu, config, layer_variant, qctx)?
+                load_moe_skip_experts(
+                    store,
+                    &lp,
+                    config.num_experts,
+                    gpu,
+                    config,
+                    layer_variant,
+                    qctx,
+                )?
             } else {
-                load_moe(store, &lp, config.num_experts, gpu, config, layer_variant, qctx)?
+                load_moe(
+                    store,
+                    &lp,
+                    config.num_experts,
+                    gpu,
+                    config,
+                    layer_variant,
+                    qctx,
+                )?
             };
             // ATLAS_BF16_ROUTER=1: keep the MoE router/gate in BF16 (skip the
             // NVFP4 quant) so expert SELECTION is decided by full-precision gate

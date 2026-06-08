@@ -290,7 +290,11 @@ pub(crate) fn load_dense_ffn(
             let down_dense = dense_auto(store, &format!("{prefix}.mlp.down_proj.weight"), gpu)?;
             let down = quantize_to_nvfp4(&down_dense, h, inter, gpu, absmax_k, quantize_k, stream)?;
             gpu.free(down_dense.weight)?;
-            Ok(DenseFfnWeights { gate_proj: gate, up_proj: up, down_proj: down })
+            Ok(DenseFfnWeights {
+                gate_proj: gate,
+                up_proj: up,
+                down_proj: down,
+            })
         }
         _ => {
             let gate = quantized_auto(store, &format!("{prefix}.mlp.gate_proj"), gpu, variant)?;

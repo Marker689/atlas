@@ -370,7 +370,17 @@ pub(super) fn load_layers_impl(
 
         // ── MoE experts (Gemma-4 26B) — extracted to loader_b ──
         let moe_ffn = build_moe_ffn(
-            store, &lp, i, config, gpu, layer_variant, qctx, h, absmax_k, quantize_k, stream,
+            store,
+            &lp,
+            i,
+            config,
+            gpu,
+            layer_variant,
+            qctx,
+            h,
+            absmax_k,
+            quantize_k,
+            stream,
         )?;
 
         tracing::info!("L{i}: building attention layer...");

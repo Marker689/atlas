@@ -59,14 +59,19 @@ pub(crate) fn load_ssm_qwen35(
     // NVFP4 on disk (CompressedTensors variant). Dequant to BF16 since
     // SsmWeightsQwen35 expects DenseWeight for all projections.
     // Per-key fallback: if the tensor doesn't have NVFP4 metadata
-    // (.weight_packed or .weight + .weight_scale), treat as BF16.
+    // (compressed-tensors needs weight_packed + weight_scale, standard
+    // needs weight + weight_scale), treat as BF16.
     let load_ssm_proj = |proj_name: &str, n: usize, k: usize| -> Result<DenseWeight> {
         let prefix = format!("{p}.{proj_name}");
-        let has_nvfp4 = store.contains(&format!("{prefix}.weight_packed"))
-            || (store.contains(&format!("{prefix}.weight"))
-                && store.contains(&format!("{prefix}.weight_scale")));
-        if matches!(variant, Nvfp4Variant::CompressedTensors | Nvfp4Variant::MxFp8)
-            && has_nvfp4
+        let has_ct_nvfp4 = store.contains(&format!("{prefix}.weight_packed"))
+            && store.contains(&format!("{prefix}.weight_scale"));
+        let has_std_nvfp4 = store.contains(&format!("{prefix}.weight"))
+            && store.contains(&format!("{prefix}.weight_scale"));
+        let has_nvfp4 = has_ct_nvfp4 || has_std_nvfp4;
+        if matches!(
+            variant,
+            Nvfp4Variant::CompressedTensors | Nvfp4Variant::MxFp8
+        ) && has_nvfp4
         {
             let Some(qctx) = qctx else {
                 anyhow::bail!(
