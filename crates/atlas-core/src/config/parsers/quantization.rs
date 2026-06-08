@@ -115,48 +115,80 @@ pub fn parse_quantization_config(raw: &serde_json::Value) -> Option<Quantization
 
 /// Parse PrismaQuant-style `config_groups` from `quantization_config`.
 ///
+/// Supports two formats:
+///   - **Array** (PrismaQuant): `[{"format": "NVFP4", "targets": [...]}, ...]`
+///   - **Nested object** (ModelOpt): `{"group_0": {"format": "NVFP4", ...}, ...}`
+///
 /// Each group declares a `format` (e.g. `"nvfp4-pack-quantized"`,
 /// `"mxfp8-quantized"`) and a `targets` array of layer-name patterns
-/// (exact names, module class names like `"Linear"`, or regex with
-/// `"re:"` prefix). Returns `Vec<(format_name, Vec<target_pattern>)>`.
+/// Returns `Vec<(format_name, Vec<target_pattern>)>`.
 fn parse_config_groups(qc: &serde_json::Value) -> Vec<(String, Vec<String>)> {
-    let Some(groups) = qc.get("config_groups").and_then(|g| g.as_object()) else {
-        return Vec::new();
-    };
+    let groups_val = qc.get("config_groups")?;
+
+    // Format A: Array of groups (PrismaQuant style)
+    if let Some(arr) = groups_val.as_array() {
+        return parse_config_groups_array(arr);
+    }
+
+    // Format B: Nested object (ModelOpt style: group_0, group_1, ...)
+    if let Some(obj) = groups_val.as_object() {
+        return parse_config_groups_object(obj);
+    }
+
+    Vec::new()
+}
+
+fn parse_config_groups_array(arr: &[serde_json::Value]) -> Vec<(String, Vec<String>)> {
     let mut result: Vec<(String, Vec<String>)> = Vec::new();
-    for (_group_key, group_val) in groups {
-        let group = match group_val.as_object() {
-            Some(o) => o,
-            None => continue,
-        };
-        let format = group
-            .get("format")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        if format.is_empty() {
-            continue;
-        }
-        let targets: Vec<String> = group
-            .get("targets")
-            .and_then(serde_json::Value::as_array)
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| {
-                        let s = v.as_str()?;
-                        // Strip "re:" prefix from regex patterns — Atlas
-                        // uses glob matching, not full regex.
-                        let pattern = s.strip_prefix("re:").unwrap_or(s);
-                        Some(pattern.to_string())
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+    for group_val in arr {
+        let Some(group) = group_val.as_object() else { continue };
+        let Some((format, targets)) = extract_group_entry(group) else { continue };
         if !targets.is_empty() {
             result.push((format, targets));
         }
     }
     result
+}
+
+fn parse_config_groups_object(
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> Vec<(String, Vec<String>)> {
+    let mut result: Vec<(String, Vec<String>)> = Vec::new();
+    for (_group_key, group_val) in obj.values() {
+        let Some(group) = group_val.as_object() else { continue };
+        let Some((format, targets)) = extract_group_entry(group) else { continue };
+        if !targets.is_empty() {
+            result.push((format, targets));
+        }
+    }
+    result
+}
+
+fn extract_group_entry(
+    group: &serde_json::Map<String, serde_json::Value>,
+) -> Option<(String, Vec<String>)> {
+    let format = group
+        .get("format")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    if format.is_empty() {
+        return None;
+    }
+    let targets: Vec<String> = group
+        .get("targets")
+        .and_then(serde_json::Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| {
+                    let s = v.as_str()?;
+                    let pattern = s.strip_prefix("re:").unwrap_or(s);
+                    Some(pattern.to_string())
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Some((format, targets))
 }
 
 /// Flatten a ModelOpt-style `hf_quant_config.json` payload into the canonical
