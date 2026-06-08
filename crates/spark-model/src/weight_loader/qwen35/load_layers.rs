@@ -165,7 +165,7 @@ pub(super) fn load_layers(
             config.num_experts,
             gpu,
             config,
-            variant,
+            layer_variant,
             absmax_k,
             quantize_k,
             stream,
@@ -540,7 +540,7 @@ pub(super) fn load_layers(
                     store,
                     &lp,
                     gpu,
-                    variant,
+                    layer_variant,
                     config,
                     h,
                     absmax_k,
@@ -585,13 +585,13 @@ pub(super) fn load_layers(
             // All non-FP8 variants (NVFP4 native, BF16, etc.) take the
             // existing NVFP4-quantized decode path.
             LayerType::LinearAttention => {
-                let layer = match variant {
+                let layer = match layer_variant {
                     Nvfp4Variant::Fp8Dequanted => linear_attn_arms::build_linear_attention_fp8(
                         i,
                         store,
                         &lp,
                         gpu,
-                        variant,
+                        layer_variant,
                         config,
                         h,
                         stream,
@@ -603,7 +603,7 @@ pub(super) fn load_layers(
                         store,
                         &lp,
                         gpu,
-                        variant,
+                        layer_variant,
                         config,
                         h,
                         absmax_k,
