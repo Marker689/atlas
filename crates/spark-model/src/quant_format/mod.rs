@@ -110,10 +110,15 @@ pub fn detect_quant_format(config: &ModelConfig, store: &WeightStore) -> Box<dyn
                 return Box::new(ModeloptFormat::new(algo.to_string(), ignore));
             }
             "compressed-tensors" => {
+                let groups_count = qc.config_groups.len();
                 tracing::info!(
-                    "QuantFormat: compressed-tensors (format={format:?}), {} ignored module(s)",
+                    "QuantFormat: compressed-tensors (format={format:?}), \
+                     {} ignored module(s), {} config group(s)",
                     ignore.len(),
+                    groups_count,
                 );
+                // mixed-precision: base variant is CompressedTensors,
+                // per-tensor dispatch in quantized_any() handles MXFP8 / NVFP4 / BF16
                 return Box::new(CompressedTensorsFormat::new(format.to_string(), ignore));
             }
             "fp8" => {
@@ -151,6 +156,10 @@ pub fn detect_quant_format(config: &ModelConfig, store: &WeightStore) -> Box<dyn
         Nvfp4Variant::CompressedTensors => {
             tracing::info!("QuantFormat: compressed-tensors (detected from tensor names)");
             Box::new(CompressedTensorsFormat::new(String::new(), ignore))
+        }
+        Nvfp4Variant::MxFp8 => {
+            tracing::info!("QuantFormat: mxfp8 (detected from tensor names), routing through compressed-tensors");
+            Box::new(CompressedTensorsFormat::new("mxfp8-quantized".to_string(), ignore))
         }
         Nvfp4Variant::Fp8Dequanted => {
             tracing::info!("QuantFormat: fp8-blockscaled (detected from tensor names)");

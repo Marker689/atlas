@@ -80,7 +80,7 @@ pub(super) fn build_full_attention_nvfp4(
             };
             (attn, Some(q), Some(k), Some(v))
         }
-        Nvfp4Variant::Standard | Nvfp4Variant::Fp8Dequanted | Nvfp4Variant::Bf16Raw => {
+        Nvfp4Variant::Standard | Nvfp4Variant::Fp8Dequanted | Nvfp4Variant::Bf16Raw | Nvfp4Variant::MxFp8 => {
             tracing::info!("Layer {i}: loading attention projections ({variant:?})");
             let load_bf16_then_nvfp4 =
                 |name: &str,

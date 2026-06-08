@@ -33,6 +33,8 @@ mod quant_helpers;
 mod quantize_fns;
 #[path = "weight_map/quantized.rs"]
 mod quantized;
+#[path = "weight_map/mxfp8.rs"]
+mod mxfp8;
 #[path = "weight_map/ssm_qwen35.rs"]
 mod ssm_qwen35;
 #[path = "weight_map/ssm_qwen35_more.rs"]
@@ -55,4 +57,4 @@ pub use ssm_qwen35::*;
 
 // Modules whose only exports are `pub(crate)` / `pub(super)` helpers.
 #[allow(unused_imports)]
-pub(crate) use {fp8_lut::*, loaders_moe::*, model_b::*, quant_helpers::*, ssm_qwen35_more::*};
+pub(crate) use {fp8_lut::*, loaders_moe::*, model_b::*, mxfp8::*, quant_helpers::*, ssm_qwen35_more::*};

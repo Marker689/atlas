@@ -176,6 +176,9 @@ pub(crate) fn quantized_auto(
         Nvfp4Variant::Bf16Raw => {
             unreachable!("Bf16Raw must use quantized_any with quant context")
         }
+        Nvfp4Variant::MxFp8 => {
+            unreachable!("MxFp8 must use quantized_any with quant context")
+        }
     }
 }
 
@@ -206,11 +209,19 @@ pub(crate) fn quantized_any(
     let has_packed = store.contains(&format!("{prefix}.weight_packed"));
     let has_scale = store.contains(&format!("{prefix}.weight_scale"));
     let has_scale_inv = store.contains(&format!("{prefix}.weight_scale_inv"));
-    let has_only_dense =
-        !has_packed && !has_scale && !has_scale_inv && store.contains(&format!("{prefix}.weight"));
+    let has_weight = store.contains(&format!("{prefix}.weight"));
+    let has_only_dense = !has_packed && !has_scale && !has_scale_inv && has_weight;
+    // MXFP8 detection: must be CompressedTensors base variant, have FP8 weight
+    // + E8M0 scale tensors, and NOT have NVFP4 packed or FP8 scale_inv.
+    let is_mxfp8 = matches!(variant, Nvfp4Variant::CompressedTensors)
+        && has_scale && has_weight && !has_packed && !has_scale_inv;
+
     let effective_variant = if has_only_dense && !matches!(variant, Nvfp4Variant::Bf16Raw) {
         tracing::debug!("{prefix}: no quantization metadata; falling back to runtime BF16→NVFP4");
         Nvfp4Variant::Bf16Raw
+    } else if is_mxfp8 {
+        tracing::debug!("{prefix}: detected MXFP8 format (CompressedTensors + weight/scale, no packed)");
+        Nvfp4Variant::MxFp8
     } else {
         variant
     };
@@ -228,6 +239,21 @@ pub(crate) fn quantized_any(
             qctx.quantize_k,
             qctx.stream,
         ),
+        Nvfp4Variant::MxFp8 => {
+            // MXFP8: dequant to BF16, then runtime-quantize to NVFP4
+            let bf16 = dequant_mxfp8_to_bf16(store, prefix, gpu)?;
+            let result = quantize_to_nvfp4(
+                &bf16,
+                n,
+                k,
+                gpu,
+                qctx.absmax_k,
+                qctx.quantize_k,
+                qctx.stream,
+            )?;
+            gpu.free(bf16.weight)?;
+            Ok(result)
+        }
         Nvfp4Variant::Bf16Raw => {
             // Raw BF16/FP32 fine-tune: load the dense weight then runtime-quantize.
             let weight_key = format!("{prefix}.weight");

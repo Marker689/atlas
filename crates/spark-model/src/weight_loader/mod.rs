@@ -108,7 +108,8 @@ impl WeightFormat {
             Nvfp4Variant::CompressedTensors | Nvfp4Variant::Standard => Self::Nvfp4,
             // Bf16Raw fine-tunes get runtime-quantized to NVFP4 inside the
             // weight loader, so the downstream pipeline sees Nvfp4.
-            Nvfp4Variant::Bf16Raw => Self::Nvfp4,
+            // MxFp8 is also BF16→NVFP4 path (dequant at load time).
+            Nvfp4Variant::Bf16Raw | Nvfp4Variant::MxFp8 => Self::Nvfp4,
         }
     }
 

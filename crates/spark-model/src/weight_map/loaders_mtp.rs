@@ -137,6 +137,10 @@ pub enum Nvfp4Variant {
     /// FullAttention if native_fp8`) and `qwen3.rs` (line 176) now branch
     /// to native FP8 paths when `quant_format == QuantFormat::Fp8`.
     Fp8Dequanted,
+    /// MXFP8_E4M3 microscaling format (PrismaQuant / compressed-tensors):
+    /// weight (float8_e4m3fn) + weight_scale (uint8 E8M0 per-group, group_size=32).
+    /// Weights are dequanted to BF16 at load time, then runtime-quantized to NVFP4.
+    MxFp8,
     /// Raw BF16/FP16 fine-tunes (e.g. samuelcardillo/Carnice-MoE-35B-A3B):
     /// only `.weight` tensors exist (no quantization metadata). Runtime-quantize
     /// from BF16 to NVFP4 at load time. Quality is suboptimal vs. a

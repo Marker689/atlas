@@ -367,6 +367,11 @@ pub struct ModelConfig {
 /// `ignore_modules` holds the already-expanded list of module-path
 /// patterns that should be loaded as dense BF16 rather than quantized.
 /// Patterns use HF glob semantics (`*` matches any non-`.` sub-path).
+///
+/// For PrismaQuant / mixed-precision checkpoints, `config_groups` maps
+/// module-path patterns to their assigned format name (e.g.
+/// `"model.layers.*.mlp.*" -> "NVFP4"`). Loaders consult this to
+/// determine per-tensor quantization variants at load time.
 #[derive(Debug, Clone)]
 pub struct QuantizationConfig {
     /// Raw `quant_method` string from the config. Stable values:
@@ -376,13 +381,18 @@ pub struct QuantizationConfig {
     /// Empty string for schemes that don't declare one (e.g. plain FP8).
     pub quant_algo: String,
     /// Optional `format` string (compressed-tensors uses this for
-    /// `"nvfp4-pack-quantized"` and friends).
+    /// `"nvfp4-pack-quantized"`, `"mixed-precision"` and friends).
     pub format: String,
     /// Module-path globs that should stay BF16 (the "ignore list" in
     /// ModelOpt terminology; `targets`/`exclude_modules` in compressed-
     /// tensors). Example entries: `"lm_head"`,
     /// `"model.layers.*.self_attn*"`.
     pub ignore_modules: Vec<String>,
+    /// Per-format module targets from `config_groups` (PrismaQuant /
+    /// mixed-precision compressed-tensors). Each entry is
+    /// `(format_name, Vec<target_pattern>)`. Example:
+    /// `("NVFP4", ["model.layers.0.mlp.*", "model.layers.1.self_attn.*"])`.
+    pub config_groups: Vec<(String, Vec<String>)>,
 }
 
 /// Vision encoder configuration for Qwen3-VL models.
