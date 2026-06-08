@@ -145,10 +145,20 @@ pub(crate) fn dense_auto(
                 // NVFP4 compressed-tensors: this is a packed weight, not FP8
                 dequant_fp8_to_bf16(store, prefix, gpu)
             } else {
-                // MXFP8: has `.weight_scale` as uint8 E8M0 (not FP8 per-tensor).
-                // Detect by absence of `.weight_packed` and `.weight_scale_inv`.
-                // MXFP8 scale is uint8, so reading it as FP8 would be garbage.
-                dequant_mxfp8_to_bf16(store, prefix, gpu)
+                // Distinguish MXFP8 (uint8 E8M0 per-group, shape [N, K/32])
+                // from float-quantized (FP32 per-channel, shape [N, 1]).
+                // Both have .weight (FP8E4M3) + .weight_scale, no packed/scale_inv.
+                let scale_key = format!("{prefix}.weight_scale");
+                let is_per_channel = store
+                    .get(&scale_key)
+                    .ok()
+                    .map(|s| s.shape.get(1).copied().unwrap_or(1) <= 1)
+                    .unwrap_or(true);
+                if is_per_channel {
+                    dequant_fp8_to_bf16(store, prefix, gpu)
+                } else {
+                    dequant_mxfp8_to_bf16(store, prefix, gpu)
+                }
             }
         }
         other => anyhow::bail!("dense_auto: unsupported dtype {:?} for {name}", other),
