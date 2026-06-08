@@ -75,7 +75,17 @@ pub fn parse_quantization_config(raw: &serde_json::Value) -> Option<Quantization
     if let Some(arr) = qc.get("ignore").and_then(serde_json::Value::as_array) {
         for v in arr {
             if let Some(s) = v.as_str() {
-                ignore_modules.push(s.to_string());
+                let mut pattern = s.to_string();
+                // Translate vLLM → HF naming (same as config_groups)
+                pattern = pattern.replace(
+                    "language_model.model.layers",
+                    "model.language_model.layers",
+                );
+                pattern = pattern.replace(
+                    "language_model.lm_head",
+                    "model.language_model.lm_head",
+                );
+                ignore_modules.push(pattern);
             }
         }
     }
@@ -85,10 +95,19 @@ pub fn parse_quantization_config(raw: &serde_json::Value) -> Option<Quantization
         .and_then(serde_json::Value::as_array)
     {
         for v in arr {
-            if let Some(s) = v.as_str()
-                && !ignore_modules.contains(&s.to_string())
-            {
-                ignore_modules.push(s.to_string());
+            if let Some(s) = v.as_str() {
+                let mut pattern = s.to_string();
+                pattern = pattern.replace(
+                    "language_model.model.layers",
+                    "model.language_model.layers",
+                );
+                pattern = pattern.replace(
+                    "language_model.lm_head",
+                    "model.language_model.lm_head",
+                );
+                if !ignore_modules.contains(&pattern) {
+                    ignore_modules.push(pattern);
+                }
             }
         }
     }
