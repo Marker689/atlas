@@ -241,6 +241,37 @@ pub(crate) fn load_dense_ffn(
                 down_proj: down,
             })
         }
+        Nvfp4Variant::MxFp8 => {
+            let inter = if config.intermediate_size > 0 {
+                config.intermediate_size
+            } else {
+                config.moe_intermediate_size
+            };
+            let h = config.hidden_size;
+            let gate = {
+                let bf16 = dequant_mxfp8_to_bf16(store, &format!("{prefix}.mlp.gate_proj"), gpu)?;
+                let q = quantize_to_nvfp4(&bf16, inter, h, gpu, absmax_k, quantize_k, stream)?;
+                gpu.free(bf16.weight)?;
+                q
+            };
+            let up = {
+                let bf16 = dequant_mxfp8_to_bf16(store, &format!("{prefix}.mlp.up_proj"), gpu)?;
+                let q = quantize_to_nvfp4(&bf16, inter, h, gpu, absmax_k, quantize_k, stream)?;
+                gpu.free(bf16.weight)?;
+                q
+            };
+            let down = {
+                let bf16 = dequant_mxfp8_to_bf16(store, &format!("{prefix}.mlp.down_proj"), gpu)?;
+                let q = quantize_to_nvfp4(&bf16, h, inter, gpu, absmax_k, quantize_k, stream)?;
+                gpu.free(bf16.weight)?;
+                q
+            };
+            Ok(DenseFfnWeights {
+                gate_proj: gate,
+                up_proj: up,
+                down_proj: down,
+            })
+        }
         _ => {
             let gate = quantized_auto(store, &format!("{prefix}.mlp.gate_proj"), gpu, variant)?;
             let up = quantized_auto(store, &format!("{prefix}.mlp.up_proj"), gpu, variant)?;

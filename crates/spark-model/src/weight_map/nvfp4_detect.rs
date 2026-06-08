@@ -177,7 +177,9 @@ pub(crate) fn quantized_auto(
             unreachable!("Bf16Raw must use quantized_any with quant context")
         }
         Nvfp4Variant::MxFp8 => {
-            unreachable!("MxFp8 must use quantized_any with quant context")
+            // MXFP8 must go through quantized_any() which handles dequant+requant.
+            // quantized_auto() is for direct-from-disk loading (no dequant step).
+            unreachable!("MxFp8 must use quantized_any with quant context (absmax_k, quantize_k, stream)")
         }
     }
 }
