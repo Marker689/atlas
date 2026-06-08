@@ -12,10 +12,10 @@ use crate::layers::{DenseFfnLayer, FfnComponent, Qwen3AttentionLayer, Qwen3SsmLa
 use crate::quant_format::detect_quant_format;
 use crate::tp_shard::{TpShardKind, load_qkvo_tp, shard_dense_bf16, shard_quantized_nvfp4};
 use crate::weight_map::{
-    AttentionWeights, DenseWeight, MtpWeights, Nvfp4Variant, SsmWeights, dense, dense_auto,
-    dense_f32_safe, dense_keep_f32, dequant_nvfp4_to_bf16, detect_nvfp4_variant, gpu_concat_rows,
-    interleave_ba, load_dense_ffn, load_kv_scales, load_mtp, load_ssm_qwen35, quantize_to_nvfp4,
-    quantized_auto,
+    AttentionWeights, DenseWeight, MtpWeights, Nvfp4Variant, QuantizeCtx, SsmWeights, dense,
+    dense_auto, dense_f32_safe, dense_keep_f32, dequant_nvfp4_to_bf16, detect_nvfp4_variant,
+    gpu_concat_rows, interleave_ba, load_dense_ffn, load_kv_scales, load_mtp, load_ssm_qwen35,
+    quantize_to_nvfp4, quantized_any,
 };
 
 pub struct Qwen35DenseWeightLoader;
@@ -117,13 +117,29 @@ impl ModelWeightLoader for Qwen35DenseWeightLoader {
                     let (attn, q_nvfp4, k_nvfp4, v_nvfp4) = match layer_variant {
                         Nvfp4Variant::CompressedTensors => {
                             // NVFP4-from-disk path: column-parallel Q/K/V, row-parallel O.
+                            // Use quantized_any() with per-key fallback for PrismaQuant
+                            // checkpoints where some projections are ignored (BF16).
                             let group_size = 16usize;
+                            let qctx = QuantizeCtx {
+                                absmax_k,
+                                quantize_k,
+                                stream,
+                            };
                             let load_nvfp4 = |name: &str,
                                               full_n: usize,
                                               full_k: usize,
                                               kind: TpShardKind|
                              -> Result<crate::weight_map::QuantizedWeight> {
-                                let src = quantized_auto(store, &format!("{p}.{name}"), gpu, variant)?;
+                                let full_prefix = format!("{p}.{name}");
+                                let src = quantized_any(
+                                    store,
+                                    &full_prefix,
+                                    full_n,
+                                    full_k,
+                                    gpu,
+                                    layer_variant,
+                                    qctx,
+                                )?;
                                 if tp_size == 1 {
                                     return Ok(src);
                                 }

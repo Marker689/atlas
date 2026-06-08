@@ -16,8 +16,8 @@ use crate::layer::TransformerLayer;
 use crate::layers::{FfnComponent, Qwen3AttentionLayer};
 use crate::tp_shard::{TpShardKind, load_qkvo_tp, shard_dense_bf16, shard_quantized_nvfp4};
 use crate::weight_map::{
-    AttentionWeights, DenseWeight, Nvfp4Variant, QuantizedWeight, dense, dense_auto,
-    dequant_mxfp8_to_bf16, load_kv_scales, quantize_to_nvfp4, quantized_auto,
+    AttentionWeights, DenseWeight, Nvfp4Variant, QuantizeCtx, QuantizedWeight, dense, dense_auto,
+    dequant_mxfp8_to_bf16, load_kv_scales, quantize_to_nvfp4, quantized_any,
 };
 
 /// Build a FullAttention layer, dispatching by per-layer variant.
@@ -65,12 +65,21 @@ pub(super) fn build_full_attention_nvfp4(
     let (attn, q_nvfp4, k_nvfp4, v_nvfp4, _q_dense, _k_dense, _v_dense, _o_dense) = match variant {
         Nvfp4Variant::CompressedTensors => {
             let group_size = 16usize;
+            let qctx = QuantizeCtx {
+                absmax_k,
+                quantize_k,
+                stream,
+            };
             let load_nvfp4 = |name: &str,
                               full_n: usize,
                               full_k: usize,
                               kind: TpShardKind|
              -> Result<crate::weight_map::QuantizedWeight> {
-                let src = quantized_auto(store, &format!("{p}.{name}"), gpu, variant)?;
+                let full_prefix = format!("{p}.{name}");
+                // Use quantized_any() with per-key fallback: if this projection
+                // is ignored (BF16 in PrismaQuant), the per-key detection
+                // falls back to Bf16Raw → runtime NVFP4 requant.
+                let src = quantized_any(store, &full_prefix, full_n, full_k, gpu, variant, qctx)?;
                 if tp_size == 1 {
                     return Ok(src);
                 }
