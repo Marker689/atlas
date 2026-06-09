@@ -155,7 +155,9 @@ pub(crate) fn dense_auto(
                     .map(|s| s.shape.get(1).copied().unwrap_or(1) <= 1)
                     .unwrap_or(true);
                 if is_per_channel {
-                    dequant_fp8_to_bf16(store, prefix, gpu)
+                    // Per-channel FP32 scales: PrismaQuant / MIXED_PRECISION
+                    // stores one scale per output channel → shape [N, 1].
+                    dequant_fp8_per_channel_to_bf16(store, prefix, gpu)
                 } else {
                     dequant_mxfp8_to_bf16(store, prefix, gpu)
                 }

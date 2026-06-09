@@ -321,3 +321,41 @@ pub(crate) fn dequant_fp8_to_bf16_into(
     gpu.copy_h2d(&bf16_buf, dest)?;
     Ok(DenseWeight { weight: dest })
 }
+
+/// Dequantize FP8 E4M3 → BF16 with per-channel FP32 scales.
+///
+/// PrismaQuant / MIXED_PRECISION checkpoints may store `weight_scale` as a
+/// per-output-channel FP32 vector (shape [N, 1]) alongside an FP8E4M3 weight
+/// (shape [N, K]). Each row `i` is scaled by `weight_scale[i]`:
+///   `bf16[i,j] = fp8[i,j] * weight_scale[i]`
+pub(crate) fn dequant_fp8_per_channel_to_bf16(
+    store: &WeightStore,
+    prefix: &str,
+    gpu: &dyn GpuBackend,
+) -> Result<DenseWeight> {
+    let w = store.get(&format!("{prefix}.weight"))?;
+    let n = w.shape[0];
+    let k = w.num_elements() / n;
+    let n_bytes = w.num_elements();
+    let mut fp8_buf = vec![0u8; n_bytes];
+    gpu.copy_d2h(w.ptr, &mut fp8_buf)?;
+    let scales_tensor = store.get(&format!("{prefix}.weight_scale"))?;
+    let scales_n = scales_tensor.num_elements();
+    let mut scales_buf = vec![0u8; scales_n * 4];
+    gpu.copy_d2h(scales_tensor.ptr, &mut scales_buf)?;
+    let bf16_buf: Vec<u8> = (0..n)
+        .flat_map(|i| {
+            let scale_bytes = &scales_buf[i * 4..(i + 1) * 4];
+            let scale = f32::from_le_bytes(scale_bytes.try_into().unwrap());
+            let row = &fp8_buf[i * k..(i + 1) * k];
+            row.iter()
+                .flat_map(move |&byte| {
+                    let val = fp8_e4m3_to_f32(byte) * scale;
+                    f32_to_bf16(val).to_le_bytes()
+                })
+        })
+        .collect();
+    let ptr = gpu.alloc(bf16_buf.len())?;
+    gpu.copy_h2d(&bf16_buf, ptr)?;
+    Ok(DenseWeight { weight: ptr })
+}

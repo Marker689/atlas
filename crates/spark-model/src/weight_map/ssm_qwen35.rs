@@ -40,6 +40,9 @@ pub(crate) fn load_ssm_qwen35(
     variant: Nvfp4Variant,
     qctx: Option<QuantizeCtx>,
     h: usize,
+    qkv_size: usize,
+    z_size: usize,
+    value_dim: usize,
 ) -> Result<SsmWeightsQwen35> {
     let p = format!("{layer_prefix}.linear_attn");
 
@@ -104,10 +107,6 @@ pub(crate) fn load_ssm_qwen35(
             load_proj(&format!("{prefix}.weight"))
         }
     };
-
-    let value_dim = 4096usize; // linear_num_value_heads(32) × linear_value_head_dim(128)
-    let qkv_size = 6144usize; // linear_num_key_heads(16) × key_head_dim(128) × 3(Q+K+V)
-    let z_size = 2048usize; // linear_num_key_heads(16) × key_head_dim(128)
 
     Ok(SsmWeightsQwen35 {
         in_proj_qkv: load_ssm_proj("in_proj_qkv", qkv_size, h)?,

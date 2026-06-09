@@ -140,14 +140,10 @@ pub(super) fn build_linear_attention_fp8(
         out_fp8.k
     );
 
-    // ── 4. BF16 dequant for prefill (single-scale FP8) + B/A interleave.
-    //       `load_ssm_qwen35` for the `Fp8Dequanted` variant calls
-    //       `dense_auto` which dequants block-scaled FP8 → BF16. We
-    //       reuse that buffer for the prefill `bf16_to_fp8` path.
-    let ssm35 = load_ssm_qwen35(store, lp, gpu, variant, None, h)?;
-
     let qkv_size = config.ssm_qkv_size();
     let z_size = config.ssm_z_size();
+    let value_dim = config.linear_num_value_heads * config.linear_value_head_dim;
+    let ssm35 = load_ssm_qwen35(store, lp, gpu, variant, None, h, qkv_size, z_size, value_dim)?;
     let qkvz_dense = gpu_concat_rows(
         &ssm35.in_proj_qkv,
         qkv_size,
@@ -257,7 +253,17 @@ pub(super) fn build_linear_attention_nvfp4(
         quantize_k,
         stream,
     };
-    let ssm35 = load_ssm_qwen35(store, lp, gpu, variant, Some(qctx_nvfp4), h)?;
+    let ssm35 = load_ssm_qwen35(
+        store,
+        lp,
+        gpu,
+        variant,
+        Some(qctx_nvfp4),
+        h,
+        config.ssm_qkv_size(),
+        config.ssm_z_size(),
+        config.linear_num_value_heads * config.linear_value_head_dim,
+    )?;
 
     let qkv_rows = config.ssm_qkv_size();
     let z_rows = config.ssm_z_size();

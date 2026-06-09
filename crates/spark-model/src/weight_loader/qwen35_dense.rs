@@ -267,27 +267,26 @@ impl ModelWeightLoader for Qwen35DenseWeightLoader {
                     let ssm_quantized = store.contains(&format!("{la}.in_proj_qkv.weight_packed"));
 
                     let (qkv_dense, z_dense, out_proj_dense) = if ssm_quantized {
-                        let qkv = dequant_nvfp4_to_bf16(
-                            store,
-                            &format!("{la}.in_proj_qkv"),
-                            qkv_rows,
-                            h,
-                            gpu,
-                        )?;
-                        let z = dequant_nvfp4_to_bf16(
-                            store,
-                            &format!("{la}.in_proj_z"),
-                            z_rows,
-                            h,
-                            gpu,
-                        )?;
-                        let out = dequant_nvfp4_to_bf16(
-                            store,
-                            &format!("{la}.out_proj"),
-                            h,
-                            value_dim,
-                            gpu,
-                        )?;
+                        // Per-projection NVFP4 detection: in_proj_qkv having
+                        // weight_packed does not guarantee out_proj or in_proj_z
+                        // are quantized — PrismaQuant mixed-precision puts some
+                        // projections in the ignore list (BF16). Fall back to
+                        // dense_auto for projections without NVFP4 metadata.
+                        let load_ssm_projection =
+                            |proj_name: &str, n: usize, k: usize| -> Result<DenseWeight> {
+                                let prefix = format!("{la}.{proj_name}");
+                                let has_proj_nvfp4 =
+                                    store.contains(&format!("{prefix}.weight_packed"))
+                                        || store.contains(&format!("{prefix}.weight_scale"));
+                                if has_proj_nvfp4 {
+                                    dequant_nvfp4_to_bf16(store, &prefix, n, k, gpu)
+                                } else {
+                                    dense_auto(store, &format!("{prefix}.weight"), gpu)
+                                }
+                            };
+                        let qkv = load_ssm_projection("in_proj_qkv", qkv_rows, h)?;
+                        let z = load_ssm_projection("in_proj_z", z_rows, h)?;
+                        let out = load_ssm_projection("out_proj", h, value_dim)?;
                         (qkv, z, out)
                     } else {
                         let qctx = crate::weight_map::QuantizeCtx {
@@ -295,7 +294,17 @@ impl ModelWeightLoader for Qwen35DenseWeightLoader {
                             quantize_k,
                             stream,
                         };
-                        let ssm35 = load_ssm_qwen35(store, &lp, gpu, layer_variant, Some(qctx), h)?;
+                        let ssm35 = load_ssm_qwen35(
+                            store,
+                            &lp,
+                            gpu,
+                            layer_variant,
+                            Some(qctx),
+                            h,
+                            qkv_rows,
+                            z_rows,
+                            value_dim,
+                        )?;
                         (ssm35.in_proj_qkv, ssm35.in_proj_z, ssm35.out_proj)
                     };
 
