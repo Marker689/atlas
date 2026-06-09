@@ -58,16 +58,16 @@ pub(crate) fn load_ssm_qwen35(
     // PrismaQuant: SSM projections (in_proj_qkv, in_proj_z, out_proj) may be
     // NVFP4 on disk (CompressedTensors variant). Dequant to BF16 since
     // SsmWeightsQwen35 expects DenseWeight for all projections.
-    // Try NVFP4 dequant first; if the tensor has NVFP4 metadata on disk
-    // but the actual weight_scale/weight_packed tensor failed to load
-    // into GPU memory (fast-loader pipeline edge case), fall back to
-    // dense_auto which loads the raw .weight tensor.
+    // Use store.get().is_ok() not store.contains() — contains() checks the
+    // safetensors index but the fast-loader may not have loaded the tensor
+    // into GPU memory (pipeline edge case with >5000 tensors/shard).
     let load_ssm_proj = |proj_name: &str, n: usize, k: usize| -> Result<DenseWeight> {
         let prefix = format!("{p}.{proj_name}");
-        let has_ct_nvfp4 = store.contains(&format!("{prefix}.weight_packed"))
-            && store.contains(&format!("{prefix}.weight_scale"));
-        let has_std_nvfp4 = store.contains(&format!("{prefix}.weight"))
-            && store.contains(&format!("{prefix}.weight_scale"));
+        let has_ct_nvfp4 =
+            store.get(&format!("{prefix}.weight_packed")).is_ok()
+                && store.get(&format!("{prefix}.weight_scale")).is_ok();
+        let has_std_nvfp4 = store.get(&format!("{prefix}.weight")).is_ok()
+            && store.get(&format!("{prefix}.weight_scale")).is_ok();
         let has_nvfp4 = has_ct_nvfp4 || has_std_nvfp4;
         if matches!(
             variant,
