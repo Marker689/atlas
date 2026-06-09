@@ -75,7 +75,7 @@ impl ModelWeightLoader for Qwen35WeightLoader {
         config: &ModelConfig,
         gpu: &dyn GpuBackend,
     ) -> Result<Option<MtpWeights>> {
-        if !store.contains("mtp.fc.weight") || !store.contains("mtp.layers.0.mlp") {
+        if !store.contains("mtp.fc.weight") {
             tracing::info!("No MTP weights found — speculative decoding disabled");
             return Ok(None);
         }
@@ -85,12 +85,19 @@ impl ModelWeightLoader for Qwen35WeightLoader {
             config.num_experts,
             variant
         );
-        let mtp = load_mtp(store, config.num_experts, gpu, variant)?;
-        tracing::info!(
-            "MTP weights loaded: fc=[2048,4096], {} experts, attn layer",
-            mtp.experts.len(),
-        );
-        Ok(Some(mtp))
+        match load_mtp(store, config.num_experts, gpu, variant) {
+            Ok(mtp) => {
+                tracing::info!(
+                    "MTP weights loaded: fc=[2048,4096], {} experts, attn layer",
+                    mtp.experts.len(),
+                );
+                Ok(Some(mtp))
+            }
+            Err(e) => {
+                tracing::warn!("MTP weights incomplete ({}), disabling speculative decoding", e);
+                Ok(None)
+            }
+        }
     }
 
     /// Load the Qwen3.6 ViT tower. Returns `None` when `config.vision` is

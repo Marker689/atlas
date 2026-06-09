@@ -495,7 +495,7 @@ impl ModelWeightLoader for Qwen35DenseWeightLoader {
         config: &ModelConfig,
         gpu: &dyn GpuBackend,
     ) -> Result<Option<MtpWeights>> {
-        if !store.contains("mtp.fc.weight") || !store.contains("mtp.layers.0.mlp") {
+        if !store.contains("mtp.fc.weight") {
             return Ok(None);
         }
         let variant = detect_nvfp4_variant(store, config);
@@ -505,18 +505,22 @@ impl ModelWeightLoader for Qwen35DenseWeightLoader {
             config.hidden_size,
             config.intermediate_size,
         );
-        // `load_mtp` auto-detects MoE vs dense FFN by inspecting the weight
-        // names. For dense Qwen3.6-27B-FP8 it returns a MtpWeights with
-        // `dense_ffn = Some(...)` and NULL placeholders for the MoE fields.
-        let mtp = load_mtp(store, config.num_experts, gpu, variant)?;
-        if mtp.dense_ffn.is_some() {
-            tracing::info!("Dense MTP head ready (FP8 e4m3 projections + dense gate/up/down MLP)");
-        } else {
-            tracing::info!(
-                "MoE MTP head ready ({} experts) — dense loader sees MoE bundle",
-                mtp.experts.len(),
-            );
+        match load_mtp(store, config.num_experts, gpu, variant) {
+            Ok(mtp) => {
+                if mtp.dense_ffn.is_some() {
+                    tracing::info!("Dense MTP head ready");
+                } else {
+                    tracing::info!("MoE MTP head ready ({} experts)", mtp.experts.len());
+                }
+                Ok(Some(mtp))
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "MTP weights incomplete or missing ({}), disabling speculative decoding",
+                    e
+                );
+                Ok(None)
+            }
         }
-        Ok(Some(mtp))
     }
 }
