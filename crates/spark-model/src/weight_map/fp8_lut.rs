@@ -29,7 +29,7 @@ pub(crate) fn dequant_nvfp4_to_bf16(
     let packed_bytes = total / 2;
     let num_groups = total / 16;
 
-    // Auto-detect format: compressed-tensors vs Standard
+    // Auto-detect format: compressed-tensors vs Standard vs per-channel
     let (packed_ptr, scale_ptr, global_scale, is_reciprocal) =
         if store.contains(&format!("{prefix}.weight_packed")) {
             // compressed-tensors: global_scale is reciprocal
@@ -37,12 +37,17 @@ pub(crate) fn dequant_nvfp4_to_bf16(
             let sp = ptr(store, &format!("{prefix}.weight_scale"))?;
             let gs = scalar_f32(store, &format!("{prefix}.weight_global_scale"), gpu)?;
             (pp, sp, gs, true)
-        } else {
+        } else if store.contains(&format!("{prefix}.weight_scale_2")) {
             // Standard/modelopt: weight_scale_2 is direct multiplier
             let pp = ptr(store, &format!("{prefix}.weight"))?;
             let sp = ptr(store, &format!("{prefix}.weight_scale"))?;
             let gs = scalar_f32(store, &format!("{prefix}.weight_scale_2"), gpu)?;
             (pp, sp, gs, false)
+        } else {
+            // PrismaQuant float-quantized: per-channel FP32 weight_scale,
+            // no weight_packed or weight_scale_2. Fall back to dense_auto
+            // which routes by dtype (FP8E4M3 → per-channel dequant).
+            return dense_auto(store, &format!("{prefix}.weight"), gpu);
         };
 
     let mut packed = vec![0u8; packed_bytes];

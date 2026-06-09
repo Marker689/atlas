@@ -137,7 +137,20 @@ pub(crate) fn dense_auto_fp8_or_bf16(
     let w = store.get(&format!("{prefix}.weight"))?;
     match w.dtype {
         WeightDtype::BF16 => Ok(DenseWeight { weight: w.ptr }),
-        WeightDtype::FP8E4M3 => dequant_fp8_blockscaled_to_bf16(store, prefix, gpu),
+        WeightDtype::FP8E4M3 => {
+            // PrismaQuant float-quantized stores per-channel FP32 weight_scale
+            // instead of block-scaled weight_scale_inv. Fall back to per-channel
+            // dequant when weight_scale_inv is absent.
+            if store.contains(&format!("{prefix}.weight_scale_inv")) {
+                dequant_fp8_blockscaled_to_bf16(store, prefix, gpu)
+            } else if store.contains(&format!("{prefix}.weight_scale")) {
+                dequant_fp8_per_channel_to_bf16(store, prefix, gpu)
+            } else {
+                anyhow::bail!(
+                    "FP8 weight {prefix}.weight has no scale metadata (weight_scale_inv or weight_scale)"
+                )
+            }
+        }
         other => anyhow::bail!(
             "dense_auto_fp8_or_bf16: unsupported dtype {:?} for {prefix}.weight",
             other
