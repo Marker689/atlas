@@ -10,7 +10,7 @@ use spark_runtime::weights::WeightStore;
 
 use super::ModelWeightLoader;
 use crate::layer::TransformerLayer;
-use crate::weight_map::{DenseWeight, MtpWeights, dense, detect_nvfp4_variant, load_mtp};
+use crate::weight_map::{DenseWeight, MtpWeights, dense, dense_auto, detect_nvfp4_variant, load_mtp};
 
 pub struct Qwen35WeightLoader;
 
@@ -134,10 +134,11 @@ impl ModelWeightLoader for Qwen35WeightLoader {
             return Ok(None);
         };
 
-        // Patch embed + position embed are always BF16.
-        let patch_embed_w = dense(store, &format!("{vp}.patch_embed.proj.weight"))?;
+        // Patch embed + position embed are always BF16 in vanilla checkpoints,
+        // but PrismaQuant may quantize them. Use dense_auto to handle all dtypes.
+        let patch_embed_w = dense_auto(store, &format!("{vp}.patch_embed.proj.weight"), gpu)?;
         let patch_embed_b = dense(store, &format!("{vp}.patch_embed.proj.bias"))?;
-        let pos_embed = dense(store, &format!("{vp}.pos_embed.weight"))?;
+        let pos_embed = dense_auto(store, &format!("{vp}.pos_embed.weight"), gpu)?;
         let pos_embed_shape = store.get(&format!("{vp}.pos_embed.weight"))?.shape.clone();
         let num_position_embeddings = pos_embed_shape
             .first()
