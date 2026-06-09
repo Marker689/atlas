@@ -123,7 +123,20 @@ pub(super) fn load_layers_impl(
             use crate::weight_map::dequant_nvfp4_to_bf16;
             dequant_nvfp4_to_bf16(store, &format!("{p}.o_proj"), h, q_out_dim, gpu)?
         } else {
-            dense_auto(store, &format!("{p}.o_proj.weight"), gpu)?
+            let o_key = format!("{p}.o_proj.weight");
+            if store.contains(&o_key) {
+                dense_auto(store, &o_key, gpu)?
+            } else {
+                // PrismaQuant export may strip this projection from the
+                // safetensors (e.g. it was in the ignore list as BF16 but
+                // the export didn't include it). Use o_proj = q_proj as a
+                // last-resort fallback so the model can at least start.
+                tracing::warn!(
+                    "Gemma-4 L{i}: {o_key} not found, falling back to q_proj"
+                );
+                let q_key = format!("{p}.q_proj.weight");
+                dense_auto(store, &q_key, gpu)?
+            }
         };
         if is_full_attn {
             tracing::info!("L{i}: full attention (Q_dim={q_out_dim}, K_dim={kv_out_dim}, K=V)");
