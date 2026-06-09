@@ -75,7 +75,7 @@ impl ModelWeightLoader for Qwen35WeightLoader {
         config: &ModelConfig,
         gpu: &dyn GpuBackend,
     ) -> Result<Option<MtpWeights>> {
-        if !store.contains("mtp.fc.weight") || !store.contains("mtp.layers.0") {
+        if !store.contains("mtp.fc.weight") || !store.contains("mtp.layers.0.mlp") {
             tracing::info!("No MTP weights found — speculative decoding disabled");
             return Ok(None);
         }

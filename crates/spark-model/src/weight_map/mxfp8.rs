@@ -109,6 +109,16 @@ pub(crate) fn dequant_mxfp8_to_bf16(
 
     // Download E8M0 scale bytes (one per group)
     let s = store.get(&format!("{prefix}.weight_scale"))?;
+    // Per-channel FP32 scale ([N, 1] or 1D [N]) — PrismaQuant float-quantized.
+    // MXFP8 expects uint8 E8M0 block scales of shape [N, K/32].
+    // If the scale doesn't match MXFP8 shape, redirect to per-channel dequant.
+    if s.shape.len() == 1 || (s.shape.len() == 2 && s.shape[1] <= 1 && s.shape[0] == n) {
+        tracing::debug!(
+            "{prefix}: scale shape {:?} → redirecting to per-channel FP8 dequant",
+            s.shape
+        );
+        return dequant_fp8_per_channel_to_bf16(store, prefix, gpu);
+    }
     let scale_shape_n = s.shape[0];
     let scale_shape_k = s.shape[1];
     ensure!(
