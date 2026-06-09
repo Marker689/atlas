@@ -217,11 +217,21 @@ pub(crate) fn quantized_any(
     let has_only_dense = !has_packed && !has_scale && !has_scale_inv && has_weight;
     // MXFP8 detection: must be CompressedTensors base variant, have FP8 weight
     // + E8M0 scale tensors, and NOT have NVFP4 packed or FP8 scale_inv.
+    // PrismaQuant float-quantized format has per-channel FP32 scales [N, 1]
+    // instead of E8M0 block scales [N, K/32]. Detect and route to per-channel
+    // dequant instead of MXFP8.
+    let is_per_channel_scale = has_scale
+        && store
+            .get(&format!("{prefix}.weight_scale"))
+            .ok()
+            .map(|s| s.shape.len() == 2 && s.shape[1] <= 1)
+            .unwrap_or(false);
     let is_mxfp8 = matches!(variant, Nvfp4Variant::CompressedTensors)
         && has_scale
         && has_weight
         && !has_packed
-        && !has_scale_inv;
+        && !has_scale_inv
+        && !is_per_channel_scale;
 
     let effective_variant = if has_only_dense && !matches!(variant, Nvfp4Variant::Bf16Raw) {
         tracing::debug!("{prefix}: no quantization metadata; falling back to runtime BF16→NVFP4");
@@ -231,6 +241,13 @@ pub(crate) fn quantized_any(
             "{prefix}: detected MXFP8 format (CompressedTensors + weight/scale, no packed)"
         );
         Nvfp4Variant::MxFp8
+    } else if is_per_channel_scale && has_weight {
+        tracing::debug!(
+            "{prefix}: detected per-channel FP32 scale (PrismaQuant float-quantized)"
+        );
+        // Route to per-channel FP8 dequant (not MXFP8, not CompressedTensors).
+        // Reuse the Fp8Dequanted path name but with per-channel semantics.
+        Nvfp4Variant::Fp8Dequanted
     } else {
         variant
     };
@@ -238,16 +255,20 @@ pub(crate) fn quantized_any(
     match effective_variant {
         Nvfp4Variant::Standard => quantized(store, prefix, gpu),
         Nvfp4Variant::CompressedTensors => quantized_v2(store, prefix, gpu),
-        Nvfp4Variant::Fp8Dequanted => quantized_from_fp8(
-            store,
-            prefix,
-            n,
-            k,
-            gpu,
-            qctx.absmax_k,
-            qctx.quantize_k,
-            qctx.stream,
-        ),
+        Nvfp4Variant::Fp8Dequanted => {
+            // Detect per-channel vs block-scaled FP8 at call time.
+            let bf16 = if is_per_channel_scale {
+                dequant_fp8_per_channel_to_bf16(store, prefix, gpu)?
+            } else {
+                dequant_fp8_blockscaled_to_bf16(store, prefix, gpu)?
+            };
+            let result = quantize_to_nvfp4(
+                &bf16, n, k, gpu,
+                qctx.absmax_k, qctx.quantize_k, qctx.stream,
+            )?;
+            gpu.free(bf16.weight)?;
+            Ok(result)
+        }
         Nvfp4Variant::MxFp8 => {
             // MXFP8: dequant to BF16, then runtime-quantize to NVFP4
             let bf16 = dequant_mxfp8_to_bf16(store, prefix, gpu)?;
