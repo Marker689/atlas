@@ -191,8 +191,21 @@ pub(crate) fn load_mtp(
     gpu: &dyn GpuBackend,
     variant: Nvfp4Variant,
 ) -> Result<MtpWeights> {
-    let p = "mtp.layers.0.self_attn";
-    let mlp = "mtp.layers.0.mlp";
+    // PrismaQuant checkpoints use either HF naming (mtp.*) or vLLM naming
+    // (language_model.mtp.*). Detect which prefix the tensors actually use.
+    let mtp_prefix = if store.contains("mtp.fc.weight") || store.contains("mtp.fc.weight_packed") {
+        ""
+    } else if store.contains("language_model.mtp.fc.weight")
+        || store.contains("language_model.mtp.fc.weight_packed")
+    {
+        "language_model."
+    } else {
+        anyhow::bail!("MTP fc.weight not found under mtp.* or language_model.mtp.*");
+    };
+    let p = format!("{mtp_prefix}mtp.layers.0.self_attn");
+    let mlp = format!("{mtp_prefix}mtp.layers.0.mlp");
+    // Helper to build mtp-prefixed tensor names.
+    let mtp_key = |suffix: &str| -> String { format!("{mtp_prefix}{suffix}") };
 
     // For FP8: expert/projection weights are FP8, norms/gates are BF16.
     let load = |name: &str| -> Result<DenseWeight> {
@@ -220,17 +233,17 @@ pub(crate) fn load_mtp(
             weight: DevicePtr::NULL,
         };
         return Ok(MtpWeights {
-            pre_fc_norm_embedding: dense(store, "mtp.pre_fc_norm_embedding.weight")?,
-            pre_fc_norm_hidden: dense(store, "mtp.pre_fc_norm_hidden.weight")?,
-            fc: load("mtp.fc.weight")?,
-            input_layernorm: dense(store, "mtp.layers.0.input_layernorm.weight")?,
+            pre_fc_norm_embedding: dense(store, &mtp_key("mtp.pre_fc_norm_embedding.weight"))?,
+            pre_fc_norm_hidden: dense(store, &mtp_key("mtp.pre_fc_norm_hidden.weight"))?,
+            fc: load(&mtp_key("mtp.fc.weight"))?,
+            input_layernorm: dense(store, &mtp_key("mtp.layers.0.input_layernorm.weight"))?,
             q_proj: load(&format!("{p}.q_proj.weight"))?,
             k_proj: load(&format!("{p}.k_proj.weight"))?,
             v_proj: load(&format!("{p}.v_proj.weight"))?,
             o_proj: load(&format!("{p}.o_proj.weight"))?,
             q_norm: dense(store, &format!("{p}.q_norm.weight"))?,
             k_norm: dense(store, &format!("{p}.k_norm.weight"))?,
-            post_attn_layernorm: dense(store, "mtp.layers.0.post_attention_layernorm.weight")?,
+            post_attn_layernorm: dense(store, &mtp_key("mtp.layers.0.post_attention_layernorm.weight"))?,
             moe_gate: null,
             shared_expert: DenseExpertWeight {
                 gate_proj: null,
@@ -240,7 +253,7 @@ pub(crate) fn load_mtp(
             shared_expert_gate: null,
             experts: Vec::new(),
             dense_ffn: Some(dense_ffn),
-            norm: dense(store, "mtp.norm.weight")?,
+            norm: dense(store, &mtp_key("mtp.norm.weight"))?,
         });
     }
 
@@ -271,8 +284,14 @@ pub(crate) fn load_mtp(
     // `[I, H]` (gate/up) or `[H, I]` (down) BF16 matrix.
     let stacked_gate_up = format!("{mlp}.experts.gate_up_proj");
     let stacked_down = format!("{mlp}.experts.down_proj");
-    let experts = if store.contains(&stacked_gate_up) && store.contains(&stacked_down) {
-        load_mtp_experts_stacked(store, mlp, num_experts)?
+    // store.contains() does exact HashMap key lookup — must match full
+    // tensor name including suffix. Check for packed (NVFP4) or raw (BF16).
+    let has_stacked = (store.contains(&format!("{stacked_gate_up}.weight_packed"))
+        || store.contains(&format!("{stacked_gate_up}.weight")))
+        && (store.contains(&format!("{stacked_down}.weight_packed"))
+            || store.contains(&format!("{stacked_down}.weight")));
+    let experts = if has_stacked {
+        load_mtp_experts_stacked(store, &mlp, num_experts)?
     } else {
         let mut v = Vec::with_capacity(num_experts);
         for e in 0..num_experts {
@@ -286,22 +305,22 @@ pub(crate) fn load_mtp(
     };
 
     Ok(MtpWeights {
-        pre_fc_norm_embedding: dense(store, "mtp.pre_fc_norm_embedding.weight")?,
-        pre_fc_norm_hidden: dense(store, "mtp.pre_fc_norm_hidden.weight")?,
-        fc: load("mtp.fc.weight")?,
-        input_layernorm: dense(store, "mtp.layers.0.input_layernorm.weight")?,
+        pre_fc_norm_embedding: dense(store, &mtp_key("mtp.pre_fc_norm_embedding.weight"))?,
+        pre_fc_norm_hidden: dense(store, &mtp_key("mtp.pre_fc_norm_hidden.weight"))?,
+        fc: load(&mtp_key("mtp.fc.weight"))?,
+        input_layernorm: dense(store, &mtp_key("mtp.layers.0.input_layernorm.weight"))?,
         q_proj: load(&format!("{p}.q_proj.weight"))?,
         k_proj: load(&format!("{p}.k_proj.weight"))?,
         v_proj: load(&format!("{p}.v_proj.weight"))?,
         o_proj: load(&format!("{p}.o_proj.weight"))?,
         q_norm: dense(store, &format!("{p}.q_norm.weight"))?,
         k_norm: dense(store, &format!("{p}.k_norm.weight"))?,
-        post_attn_layernorm: dense(store, "mtp.layers.0.post_attention_layernorm.weight")?,
+        post_attn_layernorm: dense(store, &mtp_key("mtp.layers.0.post_attention_layernorm.weight"))?,
         moe_gate: dense(store, &format!("{mlp}.gate.weight"))?,
         shared_expert,
         shared_expert_gate: dense(store, &format!("{mlp}.shared_expert_gate.weight"))?,
         experts,
         dense_ffn: None,
-        norm: dense(store, "mtp.norm.weight")?,
+        norm: dense(store, &mtp_key("mtp.norm.weight"))?,
     })
 }
