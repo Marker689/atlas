@@ -77,9 +77,11 @@ impl ModelWeightLoader for Qwen35WeightLoader {
     ) -> Result<Option<MtpWeights>> {
         // PrismaQuant checkpoints use different naming conventions:
         // rdtand exports use HF naming (mtp.*), cyburn uses vLLM naming
-        // (language_model.mtp.*). Check both prefixes.
+        // (language_model.mtp.*). NVFP4 tensors use .weight_packed suffix.
         let has_mtp = store.contains("mtp.fc.weight")
-            || store.contains("language_model.mtp.fc.weight");
+            || store.contains("mtp.fc.weight_packed")
+            || store.contains("language_model.mtp.fc.weight")
+            || store.contains("language_model.mtp.fc.weight_packed");
         if !has_mtp {
             tracing::info!("No MTP weights found — speculative decoding disabled");
             return Ok(None);
