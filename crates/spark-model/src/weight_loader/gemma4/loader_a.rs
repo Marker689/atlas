@@ -127,15 +127,20 @@ pub(super) fn load_layers_impl(
             if store.contains(&o_key) {
                 dense_auto(store, &o_key, gpu)?
             } else {
-                // PrismaQuant export may strip this projection from the
-                // safetensors (e.g. it was in the ignore list as BF16 but
-                // the export didn't include it). Use o_proj = q_proj as a
-                // last-resort fallback so the model can at least start.
-                tracing::warn!(
-                    "Gemma-4 L{i}: {o_key} not found, falling back to q_proj"
-                );
-                let q_key = format!("{p}.q_proj.weight");
-                dense_auto(store, &q_key, gpu)?
+                // PrismaQuant export may omit o_proj.weight from safetensors
+                // for some layers. Check for NVFP4 packed variant as fallback.
+                let packed_key = format!("{p}.o_proj.weight_packed");
+                if store.contains(&packed_key) {
+                    tracing::warn!("Gemma-4 L{i}: {o_key} not found, using NVFP4 packed variant");
+                    use crate::weight_map::dequant_nvfp4_to_bf16;
+                    dequant_nvfp4_to_bf16(store, &format!("{p}.o_proj"), h, q_out_dim, gpu)?
+                } else {
+                    anyhow::bail!(
+                        "Gemma-4 L{i}: {o_key} not found in store and no packed variant available. \
+                         This PrismaQuant checkpoint has a stripped o_proj tensor — \
+                         the model cannot load this layer."
+                    );
+                }
             }
         };
         if is_full_attn {
