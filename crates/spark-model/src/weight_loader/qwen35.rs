@@ -75,7 +75,12 @@ impl ModelWeightLoader for Qwen35WeightLoader {
         config: &ModelConfig,
         gpu: &dyn GpuBackend,
     ) -> Result<Option<MtpWeights>> {
-        if !store.contains("mtp.fc.weight") {
+        // PrismaQuant checkpoints use different naming conventions:
+        // rdtand exports use HF naming (mtp.*), cyburn uses vLLM naming
+        // (language_model.mtp.*). Check both prefixes.
+        let has_mtp = store.contains("mtp.fc.weight")
+            || store.contains("language_model.mtp.fc.weight");
+        if !has_mtp {
             tracing::info!("No MTP weights found — speculative decoding disabled");
             return Ok(None);
         }

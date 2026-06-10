@@ -495,7 +495,9 @@ impl ModelWeightLoader for Qwen35DenseWeightLoader {
         config: &ModelConfig,
         gpu: &dyn GpuBackend,
     ) -> Result<Option<MtpWeights>> {
-        if !store.contains("mtp.fc.weight") {
+        let has_mtp = store.contains("mtp.fc.weight")
+            || store.contains("language_model.mtp.fc.weight");
+        if !has_mtp {
             return Ok(None);
         }
         let variant = detect_nvfp4_variant(store, config);

@@ -469,7 +469,9 @@ impl ModelWeightLoader for Qwen3WeightLoader {
         config: &ModelConfig,
         gpu: &dyn GpuBackend,
     ) -> Result<Option<MtpWeights>> {
-        if !store.contains("mtp.fc.weight") {
+        let has_mtp = store.contains("mtp.fc.weight")
+            || store.contains("language_model.mtp.fc.weight");
+        if !has_mtp {
             tracing::info!("No MTP weights found — speculative decoding disabled");
             return Ok(None);
         }
