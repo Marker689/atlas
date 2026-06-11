@@ -136,7 +136,7 @@ pub(super) fn setup_lm_heads(
     // unchanged from the pre-decouple behavior.
     let mtp_lm_head_nvfp4 = if lm_head_nvfp4.is_none() && use_speculative && have_mtp_weights {
         let q = quantize_to_nvfp4(
-            lm_head,
+            lm_head_bf16_dequant.as_ref().unwrap_or(lm_head),
             config.vocab_size,
             config.hidden_size,
             gpu,

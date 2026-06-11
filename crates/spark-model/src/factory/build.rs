@@ -345,7 +345,7 @@ pub fn build_model(
     // shares embed_tokens + lm_head with the target). DenseWeight is Copy
     // so this clones the device pointer cheaply.
     let target_embed_for_dflash = embed.weight;
-    let target_lm_head_for_dflash = lm_head.weight;
+    let target_lm_head_for_dflash = lm_head_for_model.weight;
     let target_hidden_for_dflash = config.hidden_size;
 
     let lm_head_for_model = if let Some(dequant) = lm_head_bf16_dequant {
