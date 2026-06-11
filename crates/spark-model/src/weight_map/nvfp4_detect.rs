@@ -268,7 +268,46 @@ pub(crate) fn quantized_any(
 
     match effective_variant {
         Nvfp4Variant::Standard => quantized(store, prefix, gpu),
-        Nvfp4Variant::CompressedTensors => quantized_v2(store, prefix, gpu),
+        Nvfp4Variant::CompressedTensors => {
+            let q = quantized_v2(store, prefix, gpu)?;
+            // Diagnostic: verify NVFP4 dequant by manually computing first 16 values
+            if let Ok(packed_t) = store.get(&format!("{prefix}.weight_packed")) {
+                let mut packed = vec![0u8; 8];
+                let mut scales = vec![0u8; 1];
+                let global_scale = if let Ok(gs) =
+                    store.get(&format!("{prefix}.weight_global_scale"))
+                {
+                    let mut gs = [0u8; 4];
+                    gpu.copy_d2h(gs.ptr, &mut gs).ok();
+                    f32::from_le_bytes(gs)
+                } else {
+                    1.0f32
+                };
+                gpu.copy_d2h(packed_t.ptr, &mut packed).ok();
+                if let Ok(scale_t) = store.get(&format!("{prefix}.weight_scale")) {
+                    gpu.copy_d2h(scale_t.ptr, &mut scales).ok();
+                }
+                let e2m1: [f32; 16] = [
+                    0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
+                    -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,
+                ];
+                let fp8_byte = scales[0];
+                let block_scale = fp8_e4m3_to_f32(fp8_byte);
+                let combined = block_scale / global_scale;
+                let mut vals = Vec::new();
+                for i in 0..8 {
+                    let lo = packed[i] & 0x0F;
+                    let hi = (packed[i] >> 4) & 0x0F;
+                    vals.push(format!("{:.4}", e2m1[lo as usize] * combined));
+                    vals.push(format!("{:.4}", e2m1[hi as usize] * combined));
+                }
+                tracing::info!(
+                    "NVFP4 dequant diag: {prefix} fp8_scale={block_scale:.6} combined={combined:.6} global_1/{global_scale:.6} vals=[{}]",
+                    vals.join(", ")
+                );
+            }
+            Ok(q)
+        }
         Nvfp4Variant::Fp8Dequanted => {
             // Detect per-channel vs block-scaled FP8 at call time.
             let bf16 = if is_per_channel_scale {
