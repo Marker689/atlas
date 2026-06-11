@@ -244,21 +244,25 @@ pub(crate) fn quantized_any(
         && (!has_packed || is_e8m0_scale);
 
     let effective_variant = if has_only_dense && !matches!(variant, Nvfp4Variant::Bf16Raw) {
-        tracing::debug!("{prefix}: no quantization metadata; falling back to runtime BF16→NVFP4");
+        tracing::info!("{prefix}: no quantization metadata; falling back to runtime BF16→NVFP4");
         Nvfp4Variant::Bf16Raw
     } else if is_mxfp8 {
-        tracing::debug!(
+        tracing::info!(
             "{prefix}: detected MXFP8 format (CompressedTensors + weight/scale, no packed)"
         );
         Nvfp4Variant::MxFp8
     } else if is_per_channel_scale && has_weight {
-        tracing::debug!(
+        tracing::info!(
             "{prefix}: detected per-channel FP32 scale (PrismaQuant float-quantized)"
         );
         // Route to per-channel FP8 dequant (not MXFP8, not CompressedTensors).
         // Reuse the Fp8Dequanted path name but with per-channel semantics.
         Nvfp4Variant::Fp8Dequanted
     } else {
+        tracing::info!(
+            "{prefix}: no specific format detected, routing as base variant ({variant:?}) \
+             has_packed={has_packed} has_scale={has_scale} scale_dtype_uint8={is_e8m0_scale}"
+        );
         variant
     };
 
