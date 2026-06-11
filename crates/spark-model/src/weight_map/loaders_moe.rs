@@ -231,9 +231,8 @@ pub(crate) fn load_mtp(
             Nvfp4Variant::Fp8Dequanted => dense_auto(store, name, gpu),
             Nvfp4Variant::Bf16Raw => dense(store, name),
             Nvfp4Variant::CompressedTensors | Nvfp4Variant::MxFp8 => {
-                // Try raw .weight first (norms, shared_expert, q/k/v_proj are BF16).
                 if store.contains(name) {
-                    return dense(store, name);
+                    return dense_auto(store, name, gpu);
                 }
                 // Try .weight_packed (NVFP4 compressed-tensors: per-expert weights, o_proj).
                 let packed_name = format!("{name}_packed");
