@@ -245,7 +245,11 @@ pub(crate) fn load_mtp(
             }
             _ => dense(store, name),
         }
-    };
+    }
+
+    // MTP attention: q_proj doubled Q rows (nq * hd * 2), o_proj output (nq * hd).
+    let q_dim = num_attention_heads * head_dim * 2;
+    let o_out = num_attention_heads * head_dim;
 
     // Dense FFN MTP head: triple of {gate,up,down}_proj directly under
     // `mtp.layers.0.mlp`, with no `.gate.weight` router. Short-circuit before
@@ -265,9 +269,6 @@ pub(crate) fn load_mtp(
         let null = DenseWeight {
             weight: DevicePtr::NULL,
         };
-        // MTP attention: q_proj doubled Q rows (nq * hd * 2), o_proj output (nq * hd).
-        let q_dim = num_attention_heads * head_dim * 2;
-        let o_out = num_attention_heads * head_dim;
         return Ok(MtpWeights {
             pre_fc_norm_embedding: dense(store, &mtp_key("mtp.pre_fc_norm_embedding.weight"))?,
             pre_fc_norm_hidden: dense(store, &mtp_key("mtp.pre_fc_norm_hidden.weight"))?,
