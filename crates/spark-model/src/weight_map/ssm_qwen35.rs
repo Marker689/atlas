@@ -72,10 +72,16 @@ pub(crate) fn load_ssm_qwen35(
         let has_std_nvfp4 = store.get(&format!("{prefix}.weight")).is_ok()
             && store.get(&format!("{prefix}.weight_scale")).is_ok();
         let has_nvfp4 = has_ct_nvfp4 || has_std_nvfp4;
+        // PrismaQuant float-quantized / MXFP8: the weight is FP8E4M3 on disk,
+        // not UInt8 NVFP4-packed. Skip the costly quantized_any→dequant_nvfp4
+        // → fallback→dense_auto chain and go directly to dense_auto.
+        let is_fp8_weight = store.get(&format!("{prefix}.weight"))
+            .map(|w| w.dtype == spark_runtime::weights::WeightDtype::FP8E4M3)
+            .unwrap_or(false);
         if matches!(
             variant,
             Nvfp4Variant::CompressedTensors | Nvfp4Variant::MxFp8
-        ) && has_nvfp4
+        ) && has_nvfp4 && !is_fp8_weight
         {
             let Some(qctx) = qctx else {
                 anyhow::bail!(
