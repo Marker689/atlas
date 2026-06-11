@@ -28,9 +28,7 @@
 // token generation in tightly-quantized PrismaQuant models.
 __device__ unsigned char float_to_fp8_e4m3(float v) {
 #if __CUDA_ARCH__ >= 1000
-    unsigned int result;
-    asm("cvt.rn.satfinite.e4m3.f32 %0, %1;" : "=r"(result) : "f"(v));
-    return (unsigned char)result;
+    return (unsigned char)__nv_cvt_float_to_fp8(v, __NV_E4M3, __NV_SATFINITE);
 #else
     unsigned int bits = __float_as_uint(v);
     unsigned int sign = (bits >> 31) & 1;
