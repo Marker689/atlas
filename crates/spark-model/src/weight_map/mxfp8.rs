@@ -146,6 +146,24 @@ pub(crate) fn dequant_mxfp8_to_bf16(
         }
     }
 
+    // Diagnostic: print first group's raw data and dequantized result
+    {
+        let e8m0 = scale_buf[0];
+        let e8m0_scale = 2.0f32.powi(e8m0 as i32 - 127);
+        let mut fp8_vals: Vec<String> = Vec::new();
+        let mut f32_vals: Vec<String> = Vec::new();
+        for jj in 0..32.min(k as usize) {
+            let fb = fp8_buf[jj];
+            let fv = mxfp8_dequant_element(fb, e8m0);
+            fp8_vals.push(format!("0x{fb:02x}"));
+            f32_vals.push(format!("{fv:.6}"));
+        }
+        tracing::info!(
+            "MXFP8 dequant diag: {prefix} group[0] e8m0=0x{e8m0:02x} scale_2^({} -127)={e8m0_scale:.6} fp8=[{}] f32=[{}]",
+            e8m0, fp8_vals.join(", "), f32_vals.join(", ")
+        );
+    }
+
     // Upload BF16 to GPU
     let ptr = gpu.alloc(bf16_buf.len())?;
     gpu.copy_h2d(&bf16_buf, ptr)?;
@@ -228,6 +246,23 @@ pub(crate) fn dequant_mxfp8_packed_to_bf16(
                 bf16_buf.extend_from_slice(&bf16_val.to_le_bytes());
             }
         }
+    }
+
+    {
+        let e8m0 = scale_buf[0];
+        let e8m0_scale = 2.0f32.powi(e8m0 as i32 - 127);
+        let mut fp8_vals: Vec<String> = Vec::new();
+        let mut f32_vals: Vec<String> = Vec::new();
+        for jj in 0..32.min(k as usize) {
+            let fb = fp8_buf[jj];
+            let fv = mxfp8_dequant_element(fb, e8m0);
+            fp8_vals.push(format!("0x{fb:02x}"));
+            f32_vals.push(format!("{fv:.6}"));
+        }
+        tracing::info!(
+            "MXFP8 packed dequant diag: {prefix} group[0] e8m0=0x{e8m0:02x} scale_2^({} -127)={e8m0_scale:.6} fp8=[{}] f32=[{}]",
+            e8m0, fp8_vals.join(", "), f32_vals.join(", ")
+        );
     }
 
     let ptr = gpu.alloc(bf16_buf.len())?;
