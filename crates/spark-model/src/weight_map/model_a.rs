@@ -152,7 +152,18 @@ pub(crate) fn dense_auto_fp8_or_bf16(
             if store.contains(&format!("{prefix}.weight_scale_inv")) {
                 dequant_fp8_blockscaled_to_bf16(store, prefix, gpu)
             } else if store.contains(&format!("{prefix}.weight_scale")) {
-                dequant_fp8_per_channel_to_bf16(store, prefix, gpu)
+                // Distinguish per-channel FP32 (shape [N, 1]) from MXFP8 E8M0
+                // (shape [N, K/32]). Both have .weight_scale, but only
+                // per-channel has 1D (or [N, 1]) scale.
+                let is_per_channel = store
+                    .get(&format!("{prefix}.weight_scale"))
+                    .map(|s| s.shape.len() <= 1 || s.shape.get(1).copied().unwrap_or(1) <= 1)
+                    .unwrap_or(true);
+                if is_per_channel {
+                    dequant_fp8_per_channel_to_bf16(store, prefix, gpu)
+                } else {
+                    dequant_mxfp8_to_bf16(store, prefix, gpu)
+                }
             } else {
                 anyhow::bail!(
                     "FP8 weight {prefix}.weight has no scale metadata (weight_scale_inv or weight_scale)"
