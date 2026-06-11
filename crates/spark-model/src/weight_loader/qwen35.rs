@@ -92,7 +92,8 @@ impl ModelWeightLoader for Qwen35WeightLoader {
             config.num_experts,
             variant
         );
-        match load_mtp(store, config.num_experts, gpu, variant, config.hidden_size, config.intermediate_size, config.num_key_value_heads * config.head_dim, config.num_attention_heads, config.head_dim) {
+        let inter = if config.moe_intermediate_size > 0 { config.moe_intermediate_size } else { config.intermediate_size };
+        match load_mtp(store, config.num_experts, gpu, variant, config.hidden_size, inter, config.num_key_value_heads * config.head_dim, config.num_attention_heads, config.head_dim) {
             Ok(mtp) => {
                 tracing::info!(
                     "MTP weights loaded: fc=[2048,4096], {} experts, attn layer",
