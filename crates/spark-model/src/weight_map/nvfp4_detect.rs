@@ -274,12 +274,12 @@ pub(crate) fn quantized_any(
             if let Ok(packed_t) = store.get(&format!("{prefix}.weight_packed")) {
                 let mut packed = vec![0u8; 8];
                 let mut scales = vec![0u8; 1];
-                let global_scale = if let Ok(gs) =
+                let global_scale = if let Ok(gs_tensor) =
                     store.get(&format!("{prefix}.weight_global_scale"))
                 {
-                    let mut gs = [0u8; 4];
-                    gpu.copy_d2h(gs.ptr, &mut gs).ok();
-                    f32::from_le_bytes(gs)
+                    let mut gs_bytes = [0u8; 4];
+                    gpu.copy_d2h(gs_tensor.ptr, &mut gs_bytes).ok();
+                    f32::from_le_bytes(gs_bytes)
                 } else {
                     1.0f32
                 };
