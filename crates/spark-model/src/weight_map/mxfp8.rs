@@ -140,10 +140,8 @@ pub(crate) fn dequant_mxfp8_to_bf16(
             for jj in 0..group_size {
                 let fp8_byte = fp8_buf[row_offset + g * group_size + jj];
                 let f32_val = mxfp8_dequant_element(fp8_byte, e8m0);
-                // f32 → bf16: take upper 2 bytes
-                let f32_bits = f32_val.to_bits();
-                let bf16_bits = (f32_bits >> 16) as u16;
-                bf16_buf.extend_from_slice(&bf16_bits.to_le_bytes());
+                let bf16_val = f32_to_bf16(f32_val);
+                bf16_buf.extend_from_slice(&bf16_val.to_le_bytes());
             }
         }
     }
