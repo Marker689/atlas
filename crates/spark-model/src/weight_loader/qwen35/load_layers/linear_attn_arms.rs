@@ -366,26 +366,20 @@ pub(super) fn build_linear_attention_nvfp4(
         out_proj: out_proj_nvfp4,
     };
 
+    let is_mxfp8 = matches!(variant, Nvfp4Variant::MxFp8);
     let mut layer = Qwen3SsmLayer::new_sequential(
         input_norm,
         ssm,
         post_attn_norm,
         ffn,
-        Some(qkvz_nvfp4),
-        Some(qkvz_nvfp4_t),
+        if is_mxfp8 { None } else { Some(qkvz_nvfp4) },
+        if is_mxfp8 { None } else { Some(qkvz_nvfp4_t) },
         Some(out_proj_nvfp4_t),
         config,
         gpu,
     )?;
-    // MXFP8-sourced SSM: override decode path to use BF16 dense weights.
-    // The double-quant chain MXFP8→BF16→NVFP4 adds precision loss that
-    // causes thinking divergence at decode step 3 in PrismaQuant.
-    // Route out_proj through dense_gemv (BF16) instead of w4a16_gemv (NVFP4).
-    if matches!(variant, Nvfp4Variant::MxFp8) {
+    if is_mxfp8 {
         layer.out_proj_dense = Some(ssm35.out_proj);
-        tracing::info!(
-            "SSM[{lp}] MXFP8→BF16: out_proj routed through dense_gemv (skip NVFP4)"
-        );
     }
     layer.predequant_for_prefill(gpu, config, stream)?;
     // Install native FP8 prefill weights AFTER `predequant_for_prefill`
