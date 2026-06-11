@@ -142,7 +142,6 @@ pub(crate) fn dense_auto_fp8_or_bf16(
         return dequant_nvfp4_to_bf16(store, prefix, total, 1, gpu);
     }
     let w = store.get(&weight_key)?;
-    tracing::info!("dense_auto_fp8_or_bf16: prefix={prefix} dtype={:?} ptr={:?}", w.dtype, w.ptr);
     match w.dtype {
         WeightDtype::BF16 => Ok(DenseWeight { weight: w.ptr }),
         WeightDtype::FP8E4M3 => {
@@ -369,18 +368,10 @@ pub(crate) fn dequant_fp8_per_channel_to_bf16(
     let n = w.shape[0];
     let k = w.num_elements() / n;
     let n_bytes = w.num_elements();
-    tracing::info!(
-        "dequant_fp8_per_channel: prefix={prefix} shape=[{n},{k}] n_bytes={n_bytes} dtype={:?} ptr={:?}",
-        w.dtype, w.ptr
-    );
     let mut fp8_buf = vec![0u8; n_bytes];
     gpu.copy_d2h(w.ptr, &mut fp8_buf)?;
     let scales_tensor = store.get(&format!("{prefix}.weight_scale"))?;
     let scales_n = scales_tensor.num_elements();
-    tracing::info!(
-        "dequant_fp8_per_channel: scale prefix={prefix} scales_n={scales_n} dtype={:?} ptr={:?}",
-        scales_tensor.dtype, scales_tensor.ptr
-    );
     let mut scales_buf = vec![0u8; scales_n * 4];
     gpu.copy_d2h(scales_tensor.ptr, &mut scales_buf)?;
     let bf16_buf: Vec<u8> = (0..n)

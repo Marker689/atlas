@@ -28,7 +28,6 @@ pub(super) fn setup_lm_heads(
     Option<crate::weight_map::QuantizedWeight>,
 )> {
     // ── Step 3: Quantize LM head to NVFP4 for fast decode ──
-    tracing::info!("setup_lm_heads: starting, have_mtp_weights={have_mtp_weights}, use_speculative={use_speculative}");
     let absmax_k = gpu.kernel("quantize_nvfp4", "nvfp4_global_absmax")?;
     let quantize_k = gpu.kernel("quantize_nvfp4", "quantize_bf16_to_nvfp4")?;
     let stream = gpu.default_stream();
