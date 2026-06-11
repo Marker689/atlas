@@ -19,31 +19,29 @@
 #define WARP_SIZE 32
 #define GROUP_SIZE 16
 
-// ── Software float→FP8 E4M3 conversion ──
+// ── Float→FP8 E4M3 conversion ──
 //
-// SM121 (GB10) may not support the cvt.rn.satfinite.e4m3x2.f32 PTX instruction.
-// This software fallback uses IEEE 754 bit manipulation.
+// Uses hardware cvt.rn.satfinite.e4m3.f32 on SM100+ (Blackwell/GB10).
+// The software fallback had IEEE 754 rounding differences from CUTLASS/NVIDIA's
+// hardware conversion, causing per-group FP8 scales to differ for values near
+// rounding boundaries. This shifted attention values enough to corrupt thinking
+// token generation in tightly-quantized PrismaQuant models.
 __device__ unsigned char float_to_fp8_e4m3(float v) {
+#if __CUDA_ARCH__ >= 1000
+    unsigned int result;
+    asm("cvt.rn.satfinite.e4m3.f32 %0, %1;" : "=r"(result) : "f"(v));
+    return (unsigned char)result;
+#else
     unsigned int bits = __float_as_uint(v);
     unsigned int sign = (bits >> 31) & 1;
-    int f32_exp = (int)((bits >> 23) & 0xFF) - 127;  // unbiased exponent
-    unsigned int f32_man = bits & 0x7FFFFF;  // 23-bit mantissa
+    int f32_exp = (int)((bits >> 23) & 0xFF) - 127;
+    unsigned int f32_man = bits & 0x7FFFFF;
 
-    // Handle zero / denorm
     if ((bits & 0x7FFFFFFF) == 0) return (unsigned char)(sign << 7);
 
-    // Clamp to E4M3 range: [-448, 448]
-    // E4M3 max normal: exp=14, man=7 → (1+7/8)*2^(14-7) = 1.875*128 = 240...
-    // Actually max = (1+7/8)*2^7 = 240. Wait, exp=14, bias=7: 2^(14-7) = 128.
-    // (1+7/8)*128 = 240. But E4M3 max is 448 = (1+7/8)*2^8? No, exp=15 man<7.
-    // exp=15, man=6: (1+6/8)*2^(15-7) = 1.75*256 = 448. Correct.
-    // For NaN: exp=15, man=7 → skip.
-
-    // Saturate: if |v| > 448, clamp
     float absv = fabsf(v);
     if (absv > 448.0f) absv = 448.0f;
 
-    // Recompute from clamped
     bits = __float_as_uint(absv);
     f32_exp = (int)((bits >> 23) & 0xFF) - 127;
     f32_man = bits & 0x7FFFFF;
@@ -83,6 +81,7 @@ __device__ unsigned char float_to_fp8_e4m3(float v) {
         }
         return (unsigned char)((sign << 7) | (e4m3_exp << 3) | e4m3_man);
     }
+#endif
 }
 
 // ── E2M1 nearest-value quantizer ──
