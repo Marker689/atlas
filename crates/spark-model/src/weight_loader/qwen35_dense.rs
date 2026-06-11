@@ -509,7 +509,7 @@ impl ModelWeightLoader for Qwen35DenseWeightLoader {
             config.hidden_size,
             config.intermediate_size,
         );
-        match load_mtp(store, config.num_experts, gpu, variant, config.hidden_size, config.intermediate_size) {
+        match load_mtp(store, config.num_experts, gpu, variant, config.hidden_size, config.intermediate_size, config.num_key_value_heads * config.head_dim) {
             Ok(mtp) => {
                 if mtp.dense_ffn.is_some() {
                     tracing::info!("Dense MTP head ready");
