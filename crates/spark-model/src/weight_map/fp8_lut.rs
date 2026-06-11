@@ -29,6 +29,28 @@ pub(crate) fn dequant_nvfp4_to_bf16(
     let packed_bytes = total / 2;
     let num_groups = total / 16;
 
+    // Safety: verify caller-provided n*k matches the actual packed tensor size.
+    // A dimension mismatch (e.g. wrong n/k for k_proj) would silently read
+    // past the buffer. Catch it here with a clear error instead of a cryptic
+    // cuMemcpyDtoHAsync_v2 status 1 crash.
+    {
+        let packed_key = if store.contains(&format!("{prefix}.weight_packed")) {
+            format!("{prefix}.weight_packed")
+        } else {
+            format!("{prefix}.weight")
+        };
+        if let Ok(t) = store.get(&packed_key) {
+            let actual_packed = t.num_elements();
+            if actual_packed != packed_bytes {
+                anyhow::bail!(
+                    "dequant_nvfp4: dimension mismatch for {prefix}: \
+                     n={n} k={k} total={total} expected_packed={packed_bytes} \
+                     actual_packed={actual_packed}. Check caller dimensions."
+                );
+            }
+        }
+    }
+
     // Auto-detect format: compressed-tensors vs Standard vs per-channel
     let (packed_ptr, scale_ptr, global_scale, is_reciprocal) =
         if store.contains(&format!("{prefix}.weight_packed")) {

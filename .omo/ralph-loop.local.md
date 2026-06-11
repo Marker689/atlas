@@ -1,17 +1,14 @@
 ---
 active: true
-iteration: 3
+iteration: 4
 max_iterations: 500
-completion_promise: "VERIFIED"
+completion_promise: "DONE"
 initial_completion_promise: "DONE"
-verification_attempt_id: "20d420ab-eca0-48f4-8f64-31663221d75f"
-verification_session_id: "ses_14b9fc6b4ffeeTUcIRn35Z20ib"
-started_at: "2026-06-11T01:22:50.153Z"
+started_at: "2026-06-11T01:59:30.002Z"
 session_id: "ses_14bb9a6e1ffeAF63Aa0JTOTiYW"
 ultrawork: true
-verification_pending: true
 strategy: "continue"
-message_count_at_start: 0
+message_count_at_start: 107
 ---
 So, we are continuing now working on adding support for prismaquant https://github.com/RobTand/prismaquant to atlas. We have 3 models, all qwens have visual encoder and mtp support (checked in vllm). The minimum goal for now is correcly loaded prismaquanted model with working mtp. For model info u can freely go to huggingface by its prefix/name. So the logs: marker@gx10-4837:~/atlas$ ./atlas.sh -m 1
 ┌─ Atlas ──────────────────────────────────────────────
