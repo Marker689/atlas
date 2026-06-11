@@ -92,7 +92,7 @@ impl ModelWeightLoader for Qwen35WeightLoader {
             config.num_experts,
             variant
         );
-        match load_mtp(store, config.num_experts, gpu, variant) {
+        match load_mtp(store, config.num_experts, gpu, variant, config.hidden_size, config.intermediate_size) {
             Ok(mtp) => {
                 tracing::info!(
                     "MTP weights loaded: fc=[2048,4096], {} experts, attn layer",
