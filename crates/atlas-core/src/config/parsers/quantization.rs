@@ -225,6 +225,7 @@ fn extract_group_entry(
                     // Translate vLLM internal naming → HuggingFace naming:
                     //   language_model.model.layers.X → model.language_model.layers.X
                     //   language_model.lm_head → model.language_model.lm_head
+                    //   model.layers.X → model.language_model.layers.X
                     let pattern = pattern.replace(
                         "language_model.model.layers",
                         "model.language_model.layers",
@@ -232,6 +233,10 @@ fn extract_group_entry(
                     let pattern = pattern.replace(
                         "language_model.lm_head",
                         "model.language_model.lm_head",
+                    );
+                    let pattern = pattern.replace(
+                        "model.layers.",
+                        "model.language_model.layers.",
                     );
                     Some(pattern.to_string())
                 })

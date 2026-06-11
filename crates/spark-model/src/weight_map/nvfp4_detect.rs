@@ -220,6 +220,16 @@ pub(crate) fn quantized_any(
     // PrismaQuant float-quantized format has per-channel FP32 scales [N, 1]
     // instead of E8M0 block scales [N, K/32]. Detect and route to per-channel
     // dequant instead of MXFP8.
+    //
+    // Some PrismaQuant MXFP8 checkpoints store data through the weight_packed
+    // convention (same tensor name as NVFP4). Detect MXFP8 in that case by
+    // checking that weight_scale is uint8 E8M0 (NVFP4 uses FP8 per-group scales).
+    let is_e8m0_scale = has_scale
+        && store
+            .get(&format!("{prefix}.weight_scale"))
+            .ok()
+            .map(|s| s.dtype == spark_runtime::weights::WeightDtype::U8)
+            .unwrap_or(false);
     let is_per_channel_scale = has_scale
         && store
             .get(&format!("{prefix}.weight_scale"))
@@ -229,9 +239,9 @@ pub(crate) fn quantized_any(
     let is_mxfp8 = matches!(variant, Nvfp4Variant::CompressedTensors)
         && has_scale
         && has_weight
-        && !has_packed
         && !has_scale_inv
-        && !is_per_channel_scale;
+        && !is_per_channel_scale
+        && (!has_packed || is_e8m0_scale);
 
     // Diagnostic: when MXFP8-like tensors (weight + weight_scale, no packed)
     // are present but MXFP8 detection didn't fire, the weights will be
@@ -295,8 +305,14 @@ pub(crate) fn quantized_any(
             Ok(result)
         }
         Nvfp4Variant::MxFp8 => {
-            // MXFP8: dequant to BF16, then runtime-quantize to NVFP4
-            let bf16 = dequant_mxfp8_to_bf16(store, prefix, gpu)?;
+            // MXFP8: dequant to BF16, then runtime-quantize to NVFP4.
+            // PrismaQuant may store MXFP8 data in either `weight` (FP8E4M3)
+            // or `weight_packed` (same bytes, different tensor name).
+            let bf16 = if store.contains(&format!("{prefix}.weight")) {
+                dequant_mxfp8_to_bf16(store, prefix, gpu)?
+            } else {
+                dequant_mxfp8_packed_to_bf16(store, prefix, gpu)?
+            };
             let result = quantize_to_nvfp4(
                 &bf16,
                 n,

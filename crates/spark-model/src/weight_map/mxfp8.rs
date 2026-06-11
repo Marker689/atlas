@@ -156,3 +156,86 @@ pub(crate) fn dequant_mxfp8_to_bf16(
 
     Ok(DenseWeight { weight: ptr })
 }
+
+/// Variant of `dequant_mxfp8_to_bf16` that reads MXFP8 data from
+/// `weight_packed` instead of `weight`. PrismaQuant checkpoints may
+/// store MXFP8 FP8E4M3 bytes under the `weight_packed` tensor name
+/// (the standard NVFP4 convention), even though the data is not
+/// NVFP4 E2M1. The scale tensor (`weight_scale`, uint8 E8M0)
+/// distinguishes MXFP8 from NVFP4 at the detection layer.
+pub(crate) fn dequant_mxfp8_packed_to_bf16(
+    store: &WeightStore,
+    prefix: &str,
+    gpu: &dyn GpuBackend,
+) -> Result<DenseWeight> {
+    let w = store.get(&format!("{prefix}.weight_packed"))?;
+    ensure!(
+        w.shape.len() == 2,
+        "Expected 2D weight_packed for {prefix}, got {:?}",
+        w.shape
+    );
+    let n = w.shape[0];
+    let k = w.shape[1];
+    let group_size = 32usize;
+    ensure!(
+        k % group_size == 0,
+        "MXFP8 requires K ({k}) divisible by group_size ({group_size})"
+    );
+    let num_groups = k / group_size;
+
+    let fp8_size = n * k;
+    tracing::debug!("MXFP8 packed dequant: {prefix} shape=[{n},{k}] groups={num_groups}");
+
+    let mut fp8_buf = vec![0u8; fp8_size];
+    gpu.copy_d2h(w.ptr, &mut fp8_buf).with_context(|| {
+        let free = gpu.free_memory().unwrap_or(0);
+        format!(
+            "MXFP8 packed D2H failed for {prefix}.weight_packed: ptr={}, size={fp8_size}, free={:.1} GB",
+            w.ptr.0,
+            free as f64 / (1024.0 * 1024.0 * 1024.0),
+        )
+    })?;
+
+    let s = store.get(&format!("{prefix}.weight_scale"))?;
+    if s.shape.len() == 1 || (s.shape.len() == 2 && s.shape[1] <= 1 && s.shape[0] == n) {
+        tracing::debug!(
+            "{prefix}: scale shape {:?} → redirecting to per-channel FP8 dequant",
+            s.shape
+        );
+        return dequant_fp8_per_channel_to_bf16(store, prefix, gpu);
+    }
+    let scale_shape_n = s.shape[0];
+    let scale_shape_k = s.shape[1];
+    ensure!(
+        scale_shape_n == n && scale_shape_k == num_groups,
+        "MXFP8 packed scale shape [{scale_shape_n}, {scale_shape_k}] != expected [{n}, {num_groups}]"
+    );
+    let scale_size = n * num_groups;
+    let mut scale_buf = vec![0u8; scale_size];
+    gpu.copy_d2h(s.ptr, &mut scale_buf)?;
+
+    let bf16_size = n * k;
+    let mut bf16_buf: Vec<u8> = Vec::with_capacity(bf16_size * 2);
+    for i in 0..n {
+        let row_offset = i * k;
+        let scale_row_offset = i * num_groups;
+        for g in 0..num_groups {
+            let e8m0 = scale_buf[scale_row_offset + g];
+            for jj in 0..group_size {
+                let fp8_byte = fp8_buf[row_offset + g * group_size + jj];
+                let f32_val = mxfp8_dequant_element(fp8_byte, e8m0);
+                let bf16_val = f32_to_bf16(f32_val);
+                bf16_buf.extend_from_slice(&bf16_val.to_le_bytes());
+            }
+        }
+    }
+
+    let ptr = gpu.alloc(bf16_buf.len())?;
+    gpu.copy_h2d(&bf16_buf, ptr)?;
+    tracing::debug!(
+        "MXFP8 packed dequant complete: {prefix} → BF16 [{n},{k}] uploaded to ptr={}",
+        ptr.0,
+    );
+
+    Ok(DenseWeight { weight: ptr })
+}
