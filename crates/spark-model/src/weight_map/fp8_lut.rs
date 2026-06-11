@@ -85,11 +85,10 @@ pub(crate) fn dequant_nvfp4_to_bf16(
 
     // Dequant to f32, then convert to BF16
     let mut bf16_out = vec![0u16; total];
+    let mut diag_first_group = true;
     for group in 0..num_groups {
         let fp8_byte = scales[group];
         let block_scale = fp8_e4m3_to_f32(fp8_byte);
-        // compressed-tensors: weight_global_scale is reciprocal → val = E2M1 * fp8_scale / global_scale
-        // Standard/modelopt: weight_scale_2 is direct multiplier → val = E2M1 * fp8_scale * global_scale
         let combined_scale = if is_reciprocal {
             block_scale / global_scale
         } else {
@@ -106,6 +105,25 @@ pub(crate) fn dequant_nvfp4_to_bf16(
             };
             let val = e2m1_table[nibble as usize] * combined_scale;
             bf16_out[flat_idx] = f32_to_bf16(val);
+        }
+        if diag_first_group {
+            let vals: Vec<String> = (0..16)
+                .map(|e| {
+                    let idx = group * 16 + e;
+                    let nib = if idx % 2 == 0 {
+                        packed[idx / 2] & 0x0F
+                    } else {
+                        (packed[idx / 2] >> 4) & 0x0F
+                    };
+                    let v = e2m1_table[nib as usize] * combined_scale;
+                    format!("{:.4}", v)
+                })
+                .collect();
+            tracing::info!(
+                "NVFP4 dequant diag: {prefix} group[0] fp8_scale={:.6} combined={:.6} global={:.6} vals=[{}]",
+                block_scale, combined_scale, global_scale, vals.join(", ")
+            );
+            diag_first_group = false;
         }
     }
 
