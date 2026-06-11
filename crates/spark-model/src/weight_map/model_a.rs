@@ -134,7 +134,14 @@ pub(crate) fn dense_auto_fp8_or_bf16(
     prefix: &str,
     gpu: &dyn GpuBackend,
 ) -> Result<DenseWeight> {
-    let w = store.get(&format!("{prefix}.weight"))?;
+    let weight_key = format!("{prefix}.weight");
+    let packed_key = format!("{prefix}.weight_packed");
+    if store.contains(&packed_key) && !store.contains(&weight_key) {
+        let scale = store.get(&format!("{prefix}.weight_scale"))?;
+        let total = scale.shape[0] * 16; // NVFP4: 16 elts per group, n*k = num_groups * 16
+        return dequant_nvfp4_to_bf16(store, prefix, total, 1, gpu);
+    }
+    let w = store.get(&weight_key)?;
     match w.dtype {
         WeightDtype::BF16 => Ok(DenseWeight { weight: w.ptr }),
         WeightDtype::FP8E4M3 => {
