@@ -70,7 +70,7 @@ pub(super) fn setup_lm_heads(
     let mut lm_head_bf16_dequant: Option<crate::weight_map::DenseWeight> = None;
     let lm_head_nvfp4 = if lm_head_prepacked_nvfp4 {
         let prefix = lm_head_key.unwrap().strip_suffix(".weight").unwrap();
-        let bf16 = crate::weight_map::dequant_nvfp4_to_bf16(
+        let bf16 = dequant_nvfp4_to_bf16(
             store,
             prefix,
             config.vocab_size,
