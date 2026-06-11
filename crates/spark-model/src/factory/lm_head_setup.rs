@@ -47,6 +47,19 @@ pub(super) fn setup_lm_heads(
     let lm_head_prepacked_nvfp4 = lm_head_key
         .and_then(|k| store.get(k).ok())
         .is_some_and(|w| w.dtype == spark_runtime::weights::WeightDtype::UInt8);
+    // PrismaQuant may ship lm_head as FP8E4M3 with per-channel FP32 scales.
+    // `load_lm_head` uses raw `dense()` which returns the FP8 pointer as-is;
+    // if we treat it as BF16 for `quantize_to_nvfp4`, the kernel reads 2x bytes
+    // (FP8 is 1 byte/elem, BF16 is 2) producing garbage or an OOB fault.
+    let lm_head_fp8_on_disk = lm_head_key
+        .and_then(|k| store.get(k).ok())
+        .is_some_and(|w| w.dtype == spark_runtime::weights::WeightDtype::FP8E4M3);
+    if lm_head_fp8_on_disk {
+        anyhow::bail!(
+            "lm_head is FP8E4M3 on disk but was loaded as raw dense; \
+             use dense_auto() in load_lm_head() or pre-dequant to BF16 before build"
+        );
+    }
 
     // FP8 lm_head signal (`--lm-head-dtype fp8`): when we are NOT skipping
     // quantization, route the runtime LM-head quantization to FP8 (E4M3,

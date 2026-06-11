@@ -37,9 +37,12 @@ pub(crate) fn load_ssm_qwen35(
     store: &WeightStore,
     layer_prefix: &str,
     gpu: &dyn GpuBackend,
-    // Kept for loader-dispatch signature parity; `dense_auto` now routes by
-    // the projection's actual on-disk dtype rather than the model-wide variant.
-    _variant: Nvfp4Variant,
+    variant: Nvfp4Variant,
+    qctx: Option<QuantizeCtx>,
+    h: usize,
+    qkv_size: usize,
+    z_size: usize,
+    value_dim: usize,
 ) -> Result<SsmWeightsQwen35> {
     let p = format!("{layer_prefix}.linear_attn");
 
@@ -55,9 +58,65 @@ pub(crate) fn load_ssm_qwen35(
     // issue #107). The same fix in `dense_auto` covers the self_attn path.
     let load_proj = |name: &str| -> Result<DenseWeight> { dense_auto(store, name, gpu) };
 
+    // PrismaQuant: SSM projections (in_proj_qkv, in_proj_z, out_proj) may be
+    // NVFP4 on disk (CompressedTensors variant). Dequant to BF16 since
+    // SsmWeightsQwen35 expects DenseWeight for all projections.
+    // Use store.get().is_ok() not store.contains() — contains() checks the
+    // safetensors index but the fast-loader may not have loaded the tensor
+    // into GPU memory (pipeline edge case with >5000 tensors/shard).
+    let load_ssm_proj = |proj_name: &str, n: usize, k: usize| -> Result<DenseWeight> {
+        let prefix = format!("{p}.{proj_name}");
+        let has_ct_nvfp4 =
+            store.get(&format!("{prefix}.weight_packed")).is_ok()
+                && store.get(&format!("{prefix}.weight_scale")).is_ok();
+        let has_std_nvfp4 = store.get(&format!("{prefix}.weight")).is_ok()
+            && store.get(&format!("{prefix}.weight_scale")).is_ok();
+        let has_nvfp4 = has_ct_nvfp4 || has_std_nvfp4;
+        // PrismaQuant float-quantized / MXFP8: the weight is FP8E4M3 on disk,
+        // not UInt8 NVFP4-packed. Skip the costly quantized_any→dequant_nvfp4
+        // → fallback→dense_auto chain and go directly to dense_auto.
+        let is_fp8_weight = store.get(&format!("{prefix}.weight"))
+            .map(|w| w.dtype == spark_runtime::weights::WeightDtype::FP8E4M3)
+            .unwrap_or(false);
+        if matches!(
+            variant,
+            Nvfp4Variant::CompressedTensors | Nvfp4Variant::MxFp8
+        ) && has_nvfp4 && !is_fp8_weight
+        {
+            let Some(qctx) = qctx else {
+                anyhow::bail!(
+                    "load_ssm_qwen35: {proj_name} is NVFP4 on disk but no QuantizeCtx provided."
+                );
+            };
+            // Try NVFP4 dequant via quantized_any; if it falls back to
+            // Bf16Raw (per-key detection found no NVFP4 data), use the
+            // result directly. If dequant_nvfp4_to_bf16 fails, fall
+            // back to dense_auto.
+            let qw = quantized_any(store, &prefix, n, k, gpu, variant, qctx)?;
+            match dequant_nvfp4_to_bf16(store, &prefix, n, k, gpu) {
+                Ok(bf16) => {
+                    gpu.free(qw.weight)?;
+                    gpu.free(qw.weight_scale)?;
+                    Ok(bf16)
+                }
+                Err(_) => {
+                    // NVFP4 metadata tensors failed to load — fall back
+                    gpu.free(qw.weight)?;
+                    gpu.free(qw.weight_scale)?;
+                    tracing::warn!(
+                        "load_ssm_qwen35: {proj_name} NVFP4 dequant failed, falling back to dense_auto"
+                    );
+                    load_proj(&format!("{prefix}.weight"))
+                }
+            }
+        } else {
+            load_proj(&format!("{prefix}.weight"))
+        }
+    };
+
     Ok(SsmWeightsQwen35 {
-        in_proj_qkv: load_proj(&format!("{p}.in_proj_qkv.weight"))?,
-        in_proj_z: load_proj(&format!("{p}.in_proj_z.weight"))?,
+        in_proj_qkv: load_ssm_proj("in_proj_qkv", qkv_size, h)?,
+        in_proj_z: load_ssm_proj("in_proj_z", z_size, h)?,
         in_proj_a: dense(store, &format!("{p}.in_proj_a.weight"))?,
         in_proj_b: dense(store, &format!("{p}.in_proj_b.weight"))?,
         conv1d: dense(store, &format!("{p}.conv1d.weight"))?,
@@ -67,7 +126,7 @@ pub(crate) fn load_ssm_qwen35(
         dt_bias: dense_keep_f32(store, &format!("{p}.dt_bias"), gpu)?,
         // norm.weight is safe as BF16 (no recurrent amplification)
         norm: dense_f32_safe(store, &format!("{p}.norm.weight"), gpu)?,
-        out_proj: load_proj(&format!("{p}.out_proj.weight"))?,
+        out_proj: load_ssm_proj("out_proj", value_dim, h)?,
     })
 }
 
@@ -337,6 +396,7 @@ pub(crate) fn load_moe_no_shared(
     gpu: &dyn GpuBackend,
     config: &atlas_core::config::ModelConfig,
     variant: Nvfp4Variant,
+    qctx: QuantizeCtx,
 ) -> Result<MoeWeights> {
     let p = format!("{layer_prefix}.mlp");
 
@@ -388,18 +448,32 @@ pub(crate) fn load_moe_no_shared(
     for e in 0..num_experts {
         if config.is_local_expert(e) {
             experts.push(ExpertWeight {
-                gate_proj: quantized_auto(
+                gate_proj: quantized_any(
                     store,
                     &format!("{p}.experts.{e}.gate_proj"),
+                    inter,
+                    h,
                     gpu,
                     variant,
+                    qctx,
                 )?,
-                up_proj: quantized_auto(store, &format!("{p}.experts.{e}.up_proj"), gpu, variant)?,
-                down_proj: quantized_auto(
+                up_proj: quantized_any(
+                    store,
+                    &format!("{p}.experts.{e}.up_proj"),
+                    inter,
+                    h,
+                    gpu,
+                    variant,
+                    qctx,
+                )?,
+                down_proj: quantized_any(
                     store,
                     &format!("{p}.experts.{e}.down_proj"),
+                    h,
+                    inter,
                     gpu,
                     variant,
+                    qctx,
                 )?,
             });
         } else {

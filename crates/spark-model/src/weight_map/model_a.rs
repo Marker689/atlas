@@ -134,10 +134,41 @@ pub(crate) fn dense_auto_fp8_or_bf16(
     prefix: &str,
     gpu: &dyn GpuBackend,
 ) -> Result<DenseWeight> {
-    let w = store.get(&format!("{prefix}.weight"))?;
+    let weight_key = format!("{prefix}.weight");
+    let packed_key = format!("{prefix}.weight_packed");
+    if store.contains(&packed_key) && !store.contains(&weight_key) {
+        let scale = store.get(&format!("{prefix}.weight_scale"))?;
+        let total = scale.num_elements() * 16; // NVFP4: 16 elts per group, handle 1D and 2D scales
+        return dequant_nvfp4_to_bf16(store, prefix, total, 1, gpu);
+    }
+    let w = store.get(&weight_key)?;
     match w.dtype {
         WeightDtype::BF16 => Ok(DenseWeight { weight: w.ptr }),
-        WeightDtype::FP8E4M3 => dequant_fp8_blockscaled_to_bf16(store, prefix, gpu),
+        WeightDtype::FP8E4M3 => {
+            // PrismaQuant float-quantized stores per-channel FP32 weight_scale
+            // instead of block-scaled weight_scale_inv. Fall back to per-channel
+            // dequant when weight_scale_inv is absent.
+            if store.contains(&format!("{prefix}.weight_scale_inv")) {
+                dequant_fp8_blockscaled_to_bf16(store, prefix, gpu)
+            } else if store.contains(&format!("{prefix}.weight_scale")) {
+                // Distinguish per-channel FP32 (shape [N, 1]) from MXFP8 E8M0
+                // (shape [N, K/32]). Both have .weight_scale, but only
+                // per-channel has 1D (or [N, 1]) scale.
+                let is_per_channel = store
+                    .get(&format!("{prefix}.weight_scale"))
+                    .map(|s| s.shape.len() <= 1 || s.shape.get(1).copied().unwrap_or(1) <= 1)
+                    .unwrap_or(true);
+                if is_per_channel {
+                    dequant_fp8_per_channel_to_bf16(store, prefix, gpu)
+                } else {
+                    dequant_mxfp8_to_bf16(store, prefix, gpu)
+                }
+            } else {
+                anyhow::bail!(
+                    "FP8 weight {prefix}.weight has no scale metadata (weight_scale_inv or weight_scale)"
+                )
+            }
+        }
         other => anyhow::bail!(
             "dense_auto_fp8_or_bf16: unsupported dtype {:?} for {prefix}.weight",
             other
@@ -320,4 +351,42 @@ pub(crate) fn dequant_fp8_to_bf16_into(
     let bf16_buf = dequant_fp8_bytes_to_bf16(&fp8_buf, scale);
     gpu.copy_h2d(&bf16_buf, dest)?;
     Ok(DenseWeight { weight: dest })
+}
+
+/// Dequantize FP8 E4M3 → BF16 with per-channel FP32 scales.
+///
+/// PrismaQuant / MIXED_PRECISION checkpoints may store `weight_scale` as a
+/// per-output-channel FP32 vector (shape [N, 1]) alongside an FP8E4M3 weight
+/// (shape [N, K]). Each row `i` is scaled by `weight_scale[i]`:
+///   `bf16[i,j] = fp8[i,j] * weight_scale[i]`
+pub(crate) fn dequant_fp8_per_channel_to_bf16(
+    store: &WeightStore,
+    prefix: &str,
+    gpu: &dyn GpuBackend,
+) -> Result<DenseWeight> {
+    let w = store.get(&format!("{prefix}.weight"))?;
+    let n = w.shape[0];
+    let k = w.num_elements() / n;
+    let n_bytes = w.num_elements();
+    let mut fp8_buf = vec![0u8; n_bytes];
+    gpu.copy_d2h(w.ptr, &mut fp8_buf)?;
+    let scales_tensor = store.get(&format!("{prefix}.weight_scale"))?;
+    let scales_n = scales_tensor.num_elements();
+    let mut scales_buf = vec![0u8; scales_n * 4];
+    gpu.copy_d2h(scales_tensor.ptr, &mut scales_buf)?;
+    let bf16_buf: Vec<u8> = (0..n)
+        .flat_map(|i| {
+            let scale_bytes = &scales_buf[i * 4..(i + 1) * 4];
+            let scale = f32::from_le_bytes(scale_bytes.try_into().unwrap());
+            let row = &fp8_buf[i * k..(i + 1) * k];
+            row.iter()
+                .flat_map(move |&byte| {
+                    let val = fp8_e4m3_to_f32(byte) * scale;
+                    f32_to_bf16(val).to_le_bytes()
+                })
+        })
+        .collect();
+    let ptr = gpu.alloc(bf16_buf.len())?;
+    gpu.copy_h2d(&bf16_buf, ptr)?;
+    Ok(DenseWeight { weight: ptr })
 }

@@ -84,9 +84,15 @@ pub(crate) fn auto_detect_weight_prefix(
         } else if store.contains("model.language_model.embed_tokens.weight") {
             "model.language_model".to_string()
         } else {
+            // Scan for language model prefix — exclude vision/audio towers
+            // which also have .layers.0. patterns (Gemma-4, Qwen3-VL, etc.)
             let scanned = store
                 .names()
-                .find(|k| k.contains(".layers.0."))
+                .find(|k| {
+                    k.contains(".layers.0.")
+                        && !k.contains("vision_tower")
+                        && !k.contains("audio_tower")
+                })
                 .and_then(|k| k.split(".layers.0.").next())
                 .map(|s| s.to_string());
             if let Some(ref prefix) = scanned {

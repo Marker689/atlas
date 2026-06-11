@@ -75,7 +75,17 @@ pub fn parse_quantization_config(raw: &serde_json::Value) -> Option<Quantization
     if let Some(arr) = qc.get("ignore").and_then(serde_json::Value::as_array) {
         for v in arr {
             if let Some(s) = v.as_str() {
-                ignore_modules.push(s.to_string());
+                let mut pattern = s.to_string();
+                // Translate vLLM → HF naming (same as config_groups)
+                pattern = pattern.replace(
+                    "language_model.model.layers",
+                    "model.language_model.layers",
+                );
+                pattern = pattern.replace(
+                    "language_model.lm_head",
+                    "model.language_model.lm_head",
+                );
+                ignore_modules.push(pattern);
             }
         }
     }
@@ -85,17 +95,35 @@ pub fn parse_quantization_config(raw: &serde_json::Value) -> Option<Quantization
         .and_then(serde_json::Value::as_array)
     {
         for v in arr {
-            if let Some(s) = v.as_str()
-                && !ignore_modules.contains(&s.to_string())
-            {
-                ignore_modules.push(s.to_string());
+            if let Some(s) = v.as_str() {
+                let mut pattern = s.to_string();
+                pattern = pattern.replace(
+                    "language_model.model.layers",
+                    "model.language_model.layers",
+                );
+                pattern = pattern.replace(
+                    "language_model.lm_head",
+                    "model.language_model.lm_head",
+                );
+                if !ignore_modules.contains(&pattern) {
+                    ignore_modules.push(pattern);
+                }
             }
         }
     }
 
-    // An empty quant_method with empty ignore list is not a real quant
-    // config — skip so callers can fall through to heuristic detection.
-    if quant_method.is_empty() && quant_algo.is_empty() && ignore_modules.is_empty() {
+    // Parse config_groups for PrismaQuant / mixed-precision checkpoints.
+    // Each group has a `format` string and `targets` array of regex/glob patterns.
+    let config_groups = parse_config_groups(qc);
+
+    // An empty quant_method with empty ignore list and empty groups is
+    // not a real quant config — skip so callers can fall through to
+    // heuristic detection.
+    if quant_method.is_empty()
+        && quant_algo.is_empty()
+        && ignore_modules.is_empty()
+        && config_groups.is_empty()
+    {
         return None;
     }
 
@@ -104,7 +132,118 @@ pub fn parse_quantization_config(raw: &serde_json::Value) -> Option<Quantization
         quant_algo,
         format,
         ignore_modules,
+        config_groups,
     })
+}
+
+/// Parse PrismaQuant-style `config_groups` from `quantization_config`.
+///
+/// Supports two formats:
+///   - **Array** (PrismaQuant): `[{"format": "NVFP4", "targets": [...]}, ...]`
+///   - **Nested object** (ModelOpt): `{"group_0": {"format": "NVFP4", ...}, ...}`
+///
+/// Each group declares a `format` (e.g. `"nvfp4-pack-quantized"`,
+/// `"mxfp8-quantized"`) and a `targets` array of layer-name patterns
+/// Returns `Vec<(format_name, Vec<target_pattern>)>`.
+fn parse_config_groups(qc: &serde_json::Value) -> Vec<(String, Vec<String>)> {
+    let Some(groups_val) = qc.get("config_groups") else {
+        return Vec::new();
+    };
+
+    // Format A: Array of groups (PrismaQuant style)
+    if let Some(arr) = groups_val.as_array() {
+        return parse_config_groups_array(arr);
+    }
+
+    // Format B: Nested object (ModelOpt style: group_0, group_1, ...)
+    if let Some(obj) = groups_val.as_object() {
+        return parse_config_groups_object(obj);
+    }
+
+    Vec::new()
+}
+
+fn parse_config_groups_array(arr: &[serde_json::Value]) -> Vec<(String, Vec<String>)> {
+    let mut result: Vec<(String, Vec<String>)> = Vec::new();
+    for group_val in arr {
+        let Some(group) = group_val.as_object() else {
+            continue;
+        };
+        let Some((format, targets)) = extract_group_entry(group) else {
+            continue;
+        };
+        if !targets.is_empty() {
+            result.push((format, targets));
+        }
+    }
+    result
+}
+
+fn parse_config_groups_object(
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> Vec<(String, Vec<String>)> {
+    let mut result: Vec<(String, Vec<String>)> = Vec::new();
+    for group_val in obj.values() {
+        let Some(group) = group_val.as_object() else {
+            continue;
+        };
+        let Some((format, targets)) = extract_group_entry(group) else {
+            continue;
+        };
+        if !targets.is_empty() {
+            result.push((format, targets));
+        }
+    }
+    result
+}
+
+fn extract_group_entry(
+    group: &serde_json::Map<String, serde_json::Value>,
+) -> Option<(String, Vec<String>)> {
+    let format = group
+        .get("format")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    if format.is_empty() {
+        return None;
+    }
+    let targets: Vec<String> = group
+        .get("targets")
+        .and_then(serde_json::Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| {
+                    let s = v.as_str()?;
+                    // Strip "re:" prefix from regex patterns — Atlas
+                    // uses glob matching, not full regex.
+                    let pattern = s.strip_prefix("re:").unwrap_or(s);
+                    // Strip ^ anchor (start) and $ anchor (end) —
+                    // these are regex-only, glob treats them literally.
+                    let pattern = pattern.strip_prefix('^').unwrap_or(pattern);
+                    let pattern = pattern.strip_suffix('$').unwrap_or(pattern);
+                    // Translate vLLM internal naming → HuggingFace naming:
+                    //   language_model.model.layers.X → model.language_model.layers.X
+                    //   language_model.lm_head → model.language_model.lm_head
+                    //   model.layers.X → model.language_model.layers.X
+                    let pattern = pattern.replace(
+                        "language_model.model.layers",
+                        "model.language_model.layers",
+                    );
+                    let pattern = pattern.replace(
+                        "language_model.lm_head",
+                        "model.language_model.lm_head",
+                    );
+                    let pattern = pattern.replace(
+                        "model.layers.",
+                        "model.language_model.layers.",
+                    );
+                    Some(pattern.to_string())
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Some((format, targets))
 }
 
 /// Flatten a ModelOpt-style `hf_quant_config.json` payload into the canonical

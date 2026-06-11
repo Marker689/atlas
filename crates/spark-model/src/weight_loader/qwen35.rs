@@ -10,7 +10,7 @@ use spark_runtime::weights::WeightStore;
 
 use super::ModelWeightLoader;
 use crate::layer::TransformerLayer;
-use crate::weight_map::{DenseWeight, MtpWeights, dense, detect_nvfp4_variant, load_mtp};
+use crate::weight_map::{DenseWeight, MtpWeights, dense, dense_auto, detect_nvfp4_variant, load_mtp};
 
 pub struct Qwen35WeightLoader;
 
@@ -75,7 +75,14 @@ impl ModelWeightLoader for Qwen35WeightLoader {
         config: &ModelConfig,
         gpu: &dyn GpuBackend,
     ) -> Result<Option<MtpWeights>> {
-        if !store.contains("mtp.fc.weight") {
+        // PrismaQuant checkpoints use different naming conventions:
+        // rdtand exports use HF naming (mtp.*), cyburn uses vLLM naming
+        // (language_model.mtp.*). NVFP4 tensors use .weight_packed suffix.
+        let has_mtp = store.contains("mtp.fc.weight")
+            || store.contains("mtp.fc.weight_packed")
+            || store.contains("language_model.mtp.fc.weight")
+            || store.contains("language_model.mtp.fc.weight_packed");
+        if !has_mtp {
             tracing::info!("No MTP weights found — speculative decoding disabled");
             return Ok(None);
         }
@@ -85,12 +92,20 @@ impl ModelWeightLoader for Qwen35WeightLoader {
             config.num_experts,
             variant
         );
-        let mtp = load_mtp(store, config.num_experts, gpu, variant)?;
-        tracing::info!(
-            "MTP weights loaded: fc=[2048,4096], {} experts, attn layer",
-            mtp.experts.len(),
-        );
-        Ok(Some(mtp))
+        let inter = if config.moe_intermediate_size > 0 { config.moe_intermediate_size } else { config.intermediate_size };
+        match load_mtp(store, config.num_experts, gpu, variant, config.hidden_size, inter, config.num_key_value_heads * config.head_dim, config.num_attention_heads, config.head_dim) {
+            Ok(mtp) => {
+                tracing::info!(
+                    "MTP weights loaded: fc=[2048,4096], {} experts, attn layer",
+                    mtp.experts.len(),
+                );
+                Ok(Some(mtp))
+            }
+            Err(e) => {
+                tracing::warn!("MTP weights incomplete ({}), disabling speculative decoding", e);
+                Ok(None)
+            }
+        }
     }
 
     /// Load the Qwen3.6 ViT tower. Returns `None` when `config.vision` is
@@ -127,10 +142,11 @@ impl ModelWeightLoader for Qwen35WeightLoader {
             return Ok(None);
         };
 
-        // Patch embed + position embed are always BF16.
-        let patch_embed_w = dense(store, &format!("{vp}.patch_embed.proj.weight"))?;
+        // Patch embed + position embed are always BF16 in vanilla checkpoints,
+        // but PrismaQuant may quantize them. Use dense_auto to handle all dtypes.
+        let patch_embed_w = dense_auto(store, &format!("{vp}.patch_embed.proj.weight"), gpu)?;
         let patch_embed_b = dense(store, &format!("{vp}.patch_embed.proj.bias"))?;
-        let pos_embed = dense(store, &format!("{vp}.pos_embed.weight"))?;
+        let pos_embed = dense_auto(store, &format!("{vp}.pos_embed.weight"), gpu)?;
         let pos_embed_shape = store.get(&format!("{vp}.pos_embed.weight"))?.shape.clone();
         let num_position_embeddings = pos_embed_shape
             .first()

@@ -29,8 +29,33 @@ pub(super) fn load_mtp_experts_stacked(
     mlp: &str,
     num_experts: usize,
 ) -> Result<Vec<DenseExpertWeight>> {
-    let gate_up = store.get(&format!("{mlp}.experts.gate_up_proj"))?;
-    let down = store.get(&format!("{mlp}.experts.down_proj"))?;
+    let gate_up_base = format!("{mlp}.experts.gate_up_proj");
+    let down_base = format!("{mlp}.experts.down_proj");
+
+    // Try .weight suffix first, then bare name (for older checkpoints without suffix convention)
+    let gu_name = if store.contains(&format!("{gate_up_base}.weight")) {
+        format!("{gate_up_base}.weight")
+    } else if store.contains(&format!("{gate_up_base}.weight_packed")) {
+        anyhow::bail!(
+            "MTP stacked experts {gate_up_base}: NVFP4-packed stacked format not yet supported; \
+             use a per-expert split checkpoint or dequant the stacked tensor to BF16 first"
+        );
+    } else {
+        gate_up_base
+    };
+    let dn_name = if store.contains(&format!("{down_base}.weight")) {
+        format!("{down_base}.weight")
+    } else if store.contains(&format!("{down_base}.weight_packed")) {
+        anyhow::bail!(
+            "MTP stacked experts {down_base}: NVFP4-packed stacked format not yet supported; \
+             use a per-expert split checkpoint or dequant the stacked tensor to BF16 first"
+        );
+    } else {
+        down_base
+    };
+
+    let gate_up = store.get(&gu_name)?;
+    let down = store.get(&dn_name)?;
 
     ensure!(
         gate_up.shape.len() == 3,
@@ -137,6 +162,10 @@ pub enum Nvfp4Variant {
     /// FullAttention if native_fp8`) and `qwen3.rs` (line 176) now branch
     /// to native FP8 paths when `quant_format == QuantFormat::Fp8`.
     Fp8Dequanted,
+    /// MXFP8_E4M3 microscaling format (PrismaQuant / compressed-tensors):
+    /// weight (float8_e4m3fn) + weight_scale (uint8 E8M0 per-group, group_size=32).
+    /// Weights are dequanted to BF16 at load time, then runtime-quantized to NVFP4.
+    MxFp8,
     /// Raw BF16/FP16 fine-tunes (e.g. samuelcardillo/Carnice-MoE-35B-A3B):
     /// only `.weight` tensors exist (no quantization metadata). Runtime-quantize
     /// from BF16 to NVFP4 at load time. Quality is suboptimal vs. a

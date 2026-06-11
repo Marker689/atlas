@@ -9,6 +9,7 @@ use spark_runtime::weights::WeightStore;
 use super::{ModelWeightLoader, QuantFormat};
 use crate::layer::TransformerLayer;
 use crate::layers::{FfnComponent, MoeLayer, Qwen3AttentionLayer, Qwen3SsmLayer};
+use crate::quant_format::detect_quant_format;
 use crate::tp_shard::{TpShardKind, load_qkvo_tp, shard_dense_bf16, shard_fp8_block_scaled};
 use crate::weight_map::{
     AttentionWeights, DenseWeight, MtpWeights, Nvfp4Variant, QuantizeCtx, QuantizedWeight, dense,
@@ -60,12 +61,13 @@ impl ModelWeightLoader for Qwen3WeightLoader {
 
         // Detect weight format variant (Standard NVFP4, CompressedTensors, or FP8 block-scaled).
         let variant = detect_nvfp4_variant(store, config);
-        let quant_format = if variant == Nvfp4Variant::Fp8Dequanted {
+        let quant_format = detect_quant_format(config, store);
+        let quant_format_runtime = if variant == Nvfp4Variant::Fp8Dequanted {
             QuantFormat::Fp8
         } else {
             QuantFormat::Nvfp4
         };
-        let native_fp8 = quant_format == QuantFormat::Fp8;
+        let native_fp8 = quant_format_runtime == QuantFormat::Fp8;
         tracing::info!(
             "Qwen3 weight variant: {:?}, native_fp8: {}",
             variant,
@@ -102,11 +104,29 @@ impl ModelWeightLoader for Qwen3WeightLoader {
             let input_norm = dense(store, &format!("{lp}.input_layernorm.weight"))?;
             let post_attn_norm = dense(store, &format!("{lp}.post_attention_layernorm.weight"))?;
 
+            let layer_variant = quant_format.variant_for(&lp);
+
             // ── MoE weights ──
             let moe_weights = if native_fp8 {
-                load_moe_skip_experts(store, &lp, config.num_experts, gpu, config, variant, qctx)?
+                load_moe_skip_experts(
+                    store,
+                    &lp,
+                    config.num_experts,
+                    gpu,
+                    config,
+                    layer_variant,
+                    qctx,
+                )?
             } else {
-                load_moe(store, &lp, config.num_experts, gpu, config, variant, qctx)?
+                load_moe(
+                    store,
+                    &lp,
+                    config.num_experts,
+                    gpu,
+                    config,
+                    layer_variant,
+                    qctx,
+                )?
             };
             // ATLAS_BF16_ROUTER=1: keep the MoE router/gate in BF16 (skip the
             // NVFP4 quant) so expert SELECTION is decided by full-precision gate
@@ -245,7 +265,7 @@ impl ModelWeightLoader for Qwen3WeightLoader {
                 }
                 // ── NVFP4 Attention (original path) ──
                 LayerType::FullAttention => {
-                    let mut attn = load_attention(store, &lp, gpu, variant, qctx, config)?;
+                    let mut attn = load_attention(store, &lp, gpu, layer_variant, qctx, config)?;
                     let tp_rank = config.tp_rank;
                     let tp_size = config.tp_world_size.max(1);
                     // TP shard each BF16 projection BEFORE quantization. After
@@ -381,7 +401,7 @@ impl ModelWeightLoader for Qwen3WeightLoader {
                 // then quantize BF16→NVFP4. Only qkvz + out_proj need conversion (tiny).
                 //
                 LayerType::LinearAttention => {
-                    let ssm = load_ssm(store, &lp, gpu, variant, qctx, config)?;
+                    let ssm = load_ssm(store, &lp, gpu, layer_variant, qctx, config)?;
                     let qkvz_nvfp4 = quantize_to_nvfp4(
                         &ssm.in_proj_qkvz,
                         config.ssm_qkvz_size(),
@@ -449,17 +469,29 @@ impl ModelWeightLoader for Qwen3WeightLoader {
         config: &ModelConfig,
         gpu: &dyn GpuBackend,
     ) -> Result<Option<MtpWeights>> {
-        if !store.contains("mtp.fc.weight") {
+        let has_mtp = store.contains("mtp.fc.weight")
+            || store.contains("mtp.fc.weight_packed")
+            || store.contains("language_model.mtp.fc.weight")
+            || store.contains("language_model.mtp.fc.weight_packed");
+        if !has_mtp {
             tracing::info!("No MTP weights found — speculative decoding disabled");
             return Ok(None);
         }
         let variant = detect_nvfp4_variant(store, config);
         tracing::info!("Loading MTP weights (variant={:?})...", variant);
-        let mtp = load_mtp(store, config.num_experts, gpu, variant)?;
-        tracing::info!(
-            "MTP weights loaded: fc=[2048,4096], {} experts, attn layer",
-            mtp.experts.len(),
-        );
-        Ok(Some(mtp))
+        let inter = if config.moe_intermediate_size > 0 { config.moe_intermediate_size } else { config.intermediate_size };
+        match load_mtp(store, config.num_experts, gpu, variant, config.hidden_size, inter, config.num_key_value_heads * config.head_dim, config.num_attention_heads, config.head_dim) {
+            Ok(mtp) => {
+                tracing::info!(
+                    "MTP weights loaded: fc=[2048,4096], {} experts, attn layer",
+                    mtp.experts.len(),
+                );
+                Ok(Some(mtp))
+            }
+            Err(e) => {
+                tracing::warn!("MTP weights incomplete ({}), disabling speculative decoding", e);
+                Ok(None)
+            }
+        }
     }
 }

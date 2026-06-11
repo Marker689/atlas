@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use atlas_core::config::{LayerType, ModelConfig};
 use spark_runtime::gpu::GpuBackend;
 use spark_runtime::kv_cache::KvCacheDtype;
@@ -9,12 +9,13 @@ use spark_runtime::weights::WeightStore;
 use super::{ModelWeightLoader, WeightFormat};
 use crate::layer::TransformerLayer;
 use crate::layers::{DenseFfnLayer, FfnComponent, Qwen3AttentionLayer, Qwen3SsmLayer};
+use crate::quant_format::detect_quant_format;
 use crate::tp_shard::{TpShardKind, load_qkvo_tp, shard_dense_bf16, shard_quantized_nvfp4};
 use crate::weight_map::{
-    AttentionWeights, DenseWeight, MtpWeights, Nvfp4Variant, SsmWeights, dense, dense_auto,
-    dense_f32_safe, dense_keep_f32, dequant_nvfp4_to_bf16, detect_nvfp4_variant, gpu_concat_rows,
-    interleave_ba, load_dense_ffn, load_kv_scales, load_mtp, load_ssm_qwen35, quantize_to_nvfp4,
-    quantized_auto,
+    AttentionWeights, DenseWeight, MtpWeights, Nvfp4Variant, QuantizeCtx, SsmWeights, dense,
+    dense_auto, dense_auto_fp8_or_bf16, dense_f32_safe, dense_keep_f32, dequant_nvfp4_to_bf16,
+    detect_nvfp4_variant, gpu_concat_rows, interleave_ba, load_dense_ffn, load_kv_scales,
+    load_mtp, load_ssm_qwen35, quantize_to_nvfp4, quantized_any,
 };
 
 pub struct Qwen35DenseWeightLoader;
@@ -53,10 +54,12 @@ impl ModelWeightLoader for Qwen35DenseWeightLoader {
 
         let variant = detect_nvfp4_variant(store, config);
         let weight_format = WeightFormat::detect(store, config);
+        let quant_format = detect_quant_format(config, store);
         tracing::info!(
-            "Weight format: {:?}, NVFP4 variant: {:?}",
+            "Weight format: {:?}, NVFP4 variant: {:?}, QuantFormat: {}",
             weight_format,
-            variant
+            variant,
+            quant_format.name(),
         );
 
         // Native FP8 SSM prefill GEMM (Qwen3.6-27B-FP8 root-cause fix,
@@ -90,9 +93,19 @@ impl ModelWeightLoader for Qwen35DenseWeightLoader {
             let input_norm = dense(store, &format!("{lp}.input_layernorm.weight"))?;
             let post_attn_norm = dense(store, &format!("{lp}.post_attention_layernorm.weight"))?;
 
+            // PrismaQuant: per-layer format dispatch from config_groups.
+            let layer_variant = quant_format.variant_for(&lp);
+
             // Dense FFN instead of MoE
             let ffn_weights = load_dense_ffn(
-                store, &lp, gpu, variant, absmax_k, quantize_k, stream, config,
+                store,
+                &lp,
+                gpu,
+                layer_variant,
+                absmax_k,
+                quantize_k,
+                stream,
+                config,
             )?;
             let ffn = FfnComponent::Dense(DenseFfnLayer::new(ffn_weights, gpu)?);
 
@@ -101,16 +114,32 @@ impl ModelWeightLoader for Qwen35DenseWeightLoader {
                     let p = format!("{lp}.self_attn");
                     let tp_rank = config.tp_rank;
                     let tp_size = config.tp_world_size.max(1);
-                    let (attn, q_nvfp4, k_nvfp4, v_nvfp4) = match variant {
+                    let (attn, q_nvfp4, k_nvfp4, v_nvfp4) = match layer_variant {
                         Nvfp4Variant::CompressedTensors => {
                             // NVFP4-from-disk path: column-parallel Q/K/V, row-parallel O.
+                            // Use quantized_any() with per-key fallback for PrismaQuant
+                            // checkpoints where some projections are ignored (BF16).
                             let group_size = 16usize;
+                            let qctx = QuantizeCtx {
+                                absmax_k,
+                                quantize_k,
+                                stream,
+                            };
                             let load_nvfp4 = |name: &str,
                                               full_n: usize,
                                               full_k: usize,
                                               kind: TpShardKind|
                              -> Result<crate::weight_map::QuantizedWeight> {
-                                let src = quantized_auto(store, &format!("{p}.{name}"), gpu, variant)?;
+                                let full_prefix = format!("{p}.{name}");
+                                let src = quantized_any(
+                                    store,
+                                    &full_prefix,
+                                    full_n,
+                                    full_k,
+                                    gpu,
+                                    layer_variant,
+                                    qctx,
+                                )?;
                                 if tp_size == 1 {
                                     return Ok(src);
                                 }
@@ -142,7 +171,8 @@ impl ModelWeightLoader for Qwen35DenseWeightLoader {
                         }
                         Nvfp4Variant::Standard
                         | Nvfp4Variant::Fp8Dequanted
-                        | Nvfp4Variant::Bf16Raw => {
+                        | Nvfp4Variant::Bf16Raw
+                        | Nvfp4Variant::MxFp8 => {
                             // BF16 → NVFP4 path: shard BF16 then quantize per-rank.
                             let load_bf16_then_nvfp4 = |name: &str,
                                                         full_n: usize,
@@ -237,30 +267,44 @@ impl ModelWeightLoader for Qwen35DenseWeightLoader {
                     let ssm_quantized = store.contains(&format!("{la}.in_proj_qkv.weight_packed"));
 
                     let (qkv_dense, z_dense, out_proj_dense) = if ssm_quantized {
-                        let qkv = dequant_nvfp4_to_bf16(
-                            store,
-                            &format!("{la}.in_proj_qkv"),
-                            qkv_rows,
-                            h,
-                            gpu,
-                        )?;
-                        let z = dequant_nvfp4_to_bf16(
-                            store,
-                            &format!("{la}.in_proj_z"),
-                            z_rows,
-                            h,
-                            gpu,
-                        )?;
-                        let out = dequant_nvfp4_to_bf16(
-                            store,
-                            &format!("{la}.out_proj"),
-                            h,
-                            value_dim,
-                            gpu,
-                        )?;
+                        // Per-projection NVFP4 detection: in_proj_qkv having
+                        // weight_packed does not guarantee out_proj or in_proj_z
+                        // are quantized — PrismaQuant mixed-precision puts some
+                        // projections in the ignore list (BF16). Fall back to
+                        // dense_auto for projections without NVFP4 metadata.
+                        let load_ssm_projection =
+                            |proj_name: &str, n: usize, k: usize| -> Result<DenseWeight> {
+                                let prefix = format!("{la}.{proj_name}");
+                                let has_proj_nvfp4 =
+                                    store.contains(&format!("{prefix}.weight_packed"))
+                                        || store.contains(&format!("{prefix}.weight_scale"));
+                                if has_proj_nvfp4 {
+                                    dequant_nvfp4_to_bf16(store, &prefix, n, k, gpu)
+                                } else {
+                                    dense_auto(store, &format!("{prefix}.weight"), gpu)
+                                }
+                            };
+                        let qkv = load_ssm_projection("in_proj_qkv", qkv_rows, h)?;
+                        let z = load_ssm_projection("in_proj_z", z_rows, h)?;
+                        let out = load_ssm_projection("out_proj", h, value_dim)?;
                         (qkv, z, out)
                     } else {
-                        let ssm35 = load_ssm_qwen35(store, &lp, gpu, variant)?;
+                        let qctx = crate::weight_map::QuantizeCtx {
+                            absmax_k,
+                            quantize_k,
+                            stream,
+                        };
+                        let ssm35 = load_ssm_qwen35(
+                            store,
+                            &lp,
+                            gpu,
+                            layer_variant,
+                            Some(qctx),
+                            h,
+                            qkv_rows,
+                            z_rows,
+                            value_dim,
+                        )?;
                         (ssm35.in_proj_qkv, ssm35.in_proj_z, ssm35.out_proj)
                     };
 
@@ -417,6 +461,108 @@ impl ModelWeightLoader for Qwen35DenseWeightLoader {
         Ok(layers)
     }
 
+    fn load_vision_encoder(
+        &self,
+        store: &WeightStore,
+        config: &ModelConfig,
+        gpu: &dyn GpuBackend,
+    ) -> Result<Option<crate::layers::VisionEncoder>> {
+        let vcfg = match &config.vision {
+            Some(v) => v.clone(),
+            None => return Ok(None),
+        };
+        // Probe canonical `model.visual.*` + nested `model.language_model.visual.*`
+        // (used by AEON-7 re-quant and multimodal-preserved checkpoints).
+        let vp = if store.contains("model.visual.patch_embed.proj.weight") {
+            "model.visual"
+        } else if store.contains("model.language_model.visual.patch_embed.proj.weight") {
+            "model.language_model.visual"
+        } else {
+            tracing::warn!(
+                "Vision encoder tensors absent under both `model.visual.*` and \
+                 `model.language_model.visual.*`; skipping vision tower (text-only mode)"
+            );
+            return Ok(None);
+        };
+
+        // Patch embed + position embed (PrismaQuant may quantize these; dense_auto handles all dtypes).
+        let patch_embed_w = dense_auto(store, &format!("{vp}.patch_embed.proj.weight"), gpu)?;
+        let patch_embed_b = dense(store, &format!("{vp}.patch_embed.proj.bias"))?;
+        let pos_embed = dense_auto(store, &format!("{vp}.pos_embed.weight"), gpu)?;
+        let pos_embed_shape = store.get(&format!("{vp}.pos_embed.weight"))?.shape.clone();
+        let num_position_embeddings = pos_embed_shape
+            .first()
+            .copied()
+            .context("pos_embed shape missing rows")?;
+
+        let mut blocks = Vec::with_capacity(vcfg.depth);
+        for i in 0..vcfg.depth {
+            let bp = format!("{vp}.blocks.{i}");
+            blocks.push(crate::layers::ViTBlock {
+                norm1_w: dense(store, &format!("{bp}.norm1.weight"))?.weight,
+                norm1_b: dense(store, &format!("{bp}.norm1.bias"))?.weight,
+                qkv_w: dense_auto_fp8_or_bf16(store, &format!("{bp}.attn.qkv"), gpu)?.weight,
+                qkv_b: dense(store, &format!("{bp}.attn.qkv.bias"))?.weight,
+                proj_w: dense_auto_fp8_or_bf16(store, &format!("{bp}.attn.proj"), gpu)?.weight,
+                proj_b: dense(store, &format!("{bp}.attn.proj.bias"))?.weight,
+                norm2_w: dense(store, &format!("{bp}.norm2.weight"))?.weight,
+                norm2_b: dense(store, &format!("{bp}.norm2.bias"))?.weight,
+                fc1_w: dense_auto_fp8_or_bf16(store, &format!("{bp}.mlp.linear_fc1"), gpu)?.weight,
+                fc1_b: dense(store, &format!("{bp}.mlp.linear_fc1.bias"))?.weight,
+                fc2_w: dense_auto_fp8_or_bf16(store, &format!("{bp}.mlp.linear_fc2"), gpu)?.weight,
+                fc2_b: dense(store, &format!("{bp}.mlp.linear_fc2.bias"))?.weight,
+            });
+        }
+
+        let mut deepstack = Vec::with_capacity(vcfg.deepstack_visual_indexes.len());
+        for i in 0..vcfg.deepstack_visual_indexes.len() {
+            let mp = format!("{vp}.deepstack_merger_list.{i}");
+            deepstack.push(crate::layers::MergerLayer {
+                norm_w: dense(store, &format!("{mp}.norm.weight"))?.weight,
+                norm_b: dense(store, &format!("{mp}.norm.bias"))?.weight,
+                fc1_w: dense_auto_fp8_or_bf16(store, &format!("{mp}.linear_fc1"), gpu)?.weight,
+                fc1_b: dense(store, &format!("{mp}.linear_fc1.bias"))?.weight,
+                fc2_w: dense_auto_fp8_or_bf16(store, &format!("{mp}.linear_fc2"), gpu)?.weight,
+                fc2_b: dense(store, &format!("{mp}.linear_fc2.bias"))?.weight,
+            });
+        }
+
+        let mp = format!("{vp}.merger");
+        let merger = crate::layers::MergerLayer {
+            norm_w: dense(store, &format!("{mp}.norm.weight"))?.weight,
+            norm_b: dense(store, &format!("{mp}.norm.bias"))?.weight,
+            fc1_w: dense_auto_fp8_or_bf16(store, &format!("{mp}.linear_fc1"), gpu)?.weight,
+            fc1_b: dense(store, &format!("{mp}.linear_fc1.bias"))?.weight,
+            fc2_w: dense_auto_fp8_or_bf16(store, &format!("{mp}.linear_fc2"), gpu)?.weight,
+            fc2_b: dense(store, &format!("{mp}.linear_fc2.bias"))?.weight,
+        };
+
+        let deepstack_indexes = vcfg.deepstack_visual_indexes.clone();
+        let ve = crate::layers::VisionEncoder::new(
+            patch_embed_w.weight,
+            patch_embed_b.weight,
+            pos_embed.weight,
+            num_position_embeddings,
+            blocks,
+            deepstack,
+            deepstack_indexes,
+            merger,
+            vcfg.hidden_size,
+            vcfg.num_heads,
+            vcfg.spatial_merge_size,
+            vcfg.out_hidden_size,
+            vcfg.intermediate_size,
+            gpu,
+        )?;
+        tracing::info!(
+            "Qwen3.6 vision encoder loaded: depth={}, hidden={}, heads={}, FP8-blocks>=4",
+            vcfg.depth,
+            vcfg.hidden_size,
+            vcfg.num_heads,
+        );
+        Ok(Some(ve))
+    }
+
     fn load_embedding(&self, store: &WeightStore, config: &ModelConfig) -> Result<DenseWeight> {
         let prefix = &config.weight_prefix;
         dense(store, &format!("{prefix}.embed_tokens.weight"))
@@ -451,7 +597,11 @@ impl ModelWeightLoader for Qwen35DenseWeightLoader {
         config: &ModelConfig,
         gpu: &dyn GpuBackend,
     ) -> Result<Option<MtpWeights>> {
-        if !store.contains("mtp.fc.weight") {
+        let has_mtp = store.contains("mtp.fc.weight")
+            || store.contains("mtp.fc.weight_packed")
+            || store.contains("language_model.mtp.fc.weight")
+            || store.contains("language_model.mtp.fc.weight_packed");
+        if !has_mtp {
             return Ok(None);
         }
         let variant = detect_nvfp4_variant(store, config);
@@ -461,18 +611,22 @@ impl ModelWeightLoader for Qwen35DenseWeightLoader {
             config.hidden_size,
             config.intermediate_size,
         );
-        // `load_mtp` auto-detects MoE vs dense FFN by inspecting the weight
-        // names. For dense Qwen3.6-27B-FP8 it returns a MtpWeights with
-        // `dense_ffn = Some(...)` and NULL placeholders for the MoE fields.
-        let mtp = load_mtp(store, config.num_experts, gpu, variant)?;
-        if mtp.dense_ffn.is_some() {
-            tracing::info!("Dense MTP head ready (FP8 e4m3 projections + dense gate/up/down MLP)");
-        } else {
-            tracing::info!(
-                "MoE MTP head ready ({} experts) — dense loader sees MoE bundle",
-                mtp.experts.len(),
-            );
+        match load_mtp(store, config.num_experts, gpu, variant, config.hidden_size, config.intermediate_size, config.num_key_value_heads * config.head_dim, config.num_attention_heads, config.head_dim) {
+            Ok(mtp) => {
+                if mtp.dense_ffn.is_some() {
+                    tracing::info!("Dense MTP head ready");
+                } else {
+                    tracing::info!("MoE MTP head ready ({} experts)", mtp.experts.len());
+                }
+                Ok(Some(mtp))
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "MTP weights incomplete or missing ({}), disabling speculative decoding",
+                    e
+                );
+                Ok(None)
+            }
         }
-        Ok(Some(mtp))
     }
 }

@@ -29,7 +29,29 @@ pub(crate) fn dequant_nvfp4_to_bf16(
     let packed_bytes = total / 2;
     let num_groups = total / 16;
 
-    // Auto-detect format: compressed-tensors vs Standard
+    // Safety: verify caller-provided n*k matches the actual packed tensor size.
+    // A dimension mismatch (e.g. wrong n/k for k_proj) would silently read
+    // past the buffer. Catch it here with a clear error instead of a cryptic
+    // cuMemcpyDtoHAsync_v2 status 1 crash.
+    {
+        let packed_key = if store.contains(&format!("{prefix}.weight_packed")) {
+            format!("{prefix}.weight_packed")
+        } else {
+            format!("{prefix}.weight")
+        };
+        if let Ok(t) = store.get(&packed_key) {
+            let actual_packed = t.num_elements();
+            if actual_packed != packed_bytes {
+                anyhow::bail!(
+                    "dequant_nvfp4: dimension mismatch for {prefix}: \
+                     n={n} k={k} total={total} expected_packed={packed_bytes} \
+                     actual_packed={actual_packed}. Check caller dimensions."
+                );
+            }
+        }
+    }
+
+    // Auto-detect format: compressed-tensors vs Standard vs per-channel
     let (packed_ptr, scale_ptr, global_scale, is_reciprocal) =
         if store.contains(&format!("{prefix}.weight_packed")) {
             // compressed-tensors: global_scale is reciprocal
@@ -37,12 +59,17 @@ pub(crate) fn dequant_nvfp4_to_bf16(
             let sp = ptr(store, &format!("{prefix}.weight_scale"))?;
             let gs = scalar_f32(store, &format!("{prefix}.weight_global_scale"), gpu)?;
             (pp, sp, gs, true)
-        } else {
+        } else if store.contains(&format!("{prefix}.weight_scale_2")) {
             // Standard/modelopt: weight_scale_2 is direct multiplier
             let pp = ptr(store, &format!("{prefix}.weight"))?;
             let sp = ptr(store, &format!("{prefix}.weight_scale"))?;
             let gs = scalar_f32(store, &format!("{prefix}.weight_scale_2"), gpu)?;
             (pp, sp, gs, false)
+        } else {
+            // PrismaQuant float-quantized: per-channel FP32 weight_scale,
+            // no weight_packed or weight_scale_2. Fall back to dense_auto
+            // which routes by dtype (FP8E4M3 → per-channel dequant).
+            return dense_auto(store, &format!("{prefix}.weight"), gpu);
         };
 
     let mut packed = vec![0u8; packed_bytes];
@@ -241,6 +268,61 @@ pub(crate) fn load_dense_ffn(
                 down_proj: down,
             })
         }
+        Nvfp4Variant::MxFp8 => {
+            let inter = if config.intermediate_size > 0 {
+                config.intermediate_size
+            } else {
+                config.moe_intermediate_size
+            };
+            let h = config.hidden_size;
+            let gate = {
+                let bf16 = dequant_mxfp8_to_bf16(store, &format!("{prefix}.mlp.gate_proj"), gpu)?;
+                let q = quantize_to_nvfp4(&bf16, inter, h, gpu, absmax_k, quantize_k, stream)?;
+                gpu.free(bf16.weight)?;
+                q
+            };
+            let up = {
+                let bf16 = dequant_mxfp8_to_bf16(store, &format!("{prefix}.mlp.up_proj"), gpu)?;
+                let q = quantize_to_nvfp4(&bf16, inter, h, gpu, absmax_k, quantize_k, stream)?;
+                gpu.free(bf16.weight)?;
+                q
+            };
+            let down = {
+                let bf16 = dequant_mxfp8_to_bf16(store, &format!("{prefix}.mlp.down_proj"), gpu)?;
+                let q = quantize_to_nvfp4(&bf16, h, inter, gpu, absmax_k, quantize_k, stream)?;
+                gpu.free(bf16.weight)?;
+                q
+            };
+            Ok(DenseFfnWeights {
+                gate_proj: gate,
+                up_proj: up,
+                down_proj: down,
+            })
+        }
+        Nvfp4Variant::Bf16Raw => {
+            // PrismaQuant: float-quantized / raw BF16 — load via dense_auto()
+            // then runtime-quantize to NVFP4 so DenseFfnWeights gets QuantizedWeight.
+            let inter = if config.intermediate_size > 0 {
+                config.intermediate_size
+            } else {
+                config.moe_intermediate_size
+            };
+            let h = config.hidden_size;
+            let gate_dense = dense_auto(store, &format!("{prefix}.mlp.gate_proj.weight"), gpu)?;
+            let gate = quantize_to_nvfp4(&gate_dense, inter, h, gpu, absmax_k, quantize_k, stream)?;
+            gpu.free(gate_dense.weight)?;
+            let up_dense = dense_auto(store, &format!("{prefix}.mlp.up_proj.weight"), gpu)?;
+            let up = quantize_to_nvfp4(&up_dense, inter, h, gpu, absmax_k, quantize_k, stream)?;
+            gpu.free(up_dense.weight)?;
+            let down_dense = dense_auto(store, &format!("{prefix}.mlp.down_proj.weight"), gpu)?;
+            let down = quantize_to_nvfp4(&down_dense, h, inter, gpu, absmax_k, quantize_k, stream)?;
+            gpu.free(down_dense.weight)?;
+            Ok(DenseFfnWeights {
+                gate_proj: gate,
+                up_proj: up,
+                down_proj: down,
+            })
+        }
         _ => {
             let gate = quantized_auto(store, &format!("{prefix}.mlp.gate_proj"), gpu, variant)?;
             let up = quantized_auto(store, &format!("{prefix}.mlp.up_proj"), gpu, variant)?;
@@ -262,8 +344,13 @@ pub(crate) fn load_mtp_qwen35(
     num_experts: usize,
     gpu: &dyn GpuBackend,
     variant: Nvfp4Variant,
+    hidden_size: usize,
+    intermediate_size: usize,
+    kv_proj_dim: usize,
+    num_attention_heads: usize,
+    head_dim: usize,
 ) -> Result<MtpWeights> {
-    load_mtp(store, num_experts, gpu, variant)
+    load_mtp(store, num_experts, gpu, variant, hidden_size, intermediate_size, kv_proj_dim, num_attention_heads, head_dim)
 }
 
 /// GPU-concatenate two weight matrices row-wise: [A; B] → [A_rows + B_rows, K].

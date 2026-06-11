@@ -12,6 +12,7 @@ use super::loader_b::{build_bf16_mlp, build_moe_ffn};
 use crate::layer::TransformerLayer;
 use crate::layers::dense_ffn::DenseFfnWeights;
 use crate::layers::{DenseFfnLayer, FfnActivation, FfnComponent, Qwen3AttentionLayer};
+use crate::quant_format::detect_quant_format;
 use crate::tp_shard::{TpShardKind, shard_dense_bf16};
 use crate::weight_map::{
     AttentionWeights, QuantizeCtx, dense, dense_auto, detect_nvfp4_variant, load_kv_scales,
@@ -27,6 +28,7 @@ pub(super) fn load_layers_impl(
     let mut layers: Vec<Box<dyn TransformerLayer>> = Vec::with_capacity(config.num_hidden_layers);
 
     let variant = detect_nvfp4_variant(store, config);
+    let quant_format = detect_quant_format(config, store);
     tracing::info!("Gemma-4 NVFP4 variant: {:?}", variant);
 
     let absmax_k = gpu.kernel("quantize_nvfp4", "nvfp4_global_absmax")?;
@@ -41,6 +43,7 @@ pub(super) fn load_layers_impl(
 
     for i in 0..config.num_hidden_layers {
         let lp = config.layer_prefix(i);
+        let layer_variant = quant_format.variant_for(&lp);
 
         // ── Layer norms ──
         // Gemma-4 has 4 norms: input, post_attn, pre_ffn, post_ffn.
@@ -120,7 +123,25 @@ pub(super) fn load_layers_impl(
             use crate::weight_map::dequant_nvfp4_to_bf16;
             dequant_nvfp4_to_bf16(store, &format!("{p}.o_proj"), h, q_out_dim, gpu)?
         } else {
-            dense_auto(store, &format!("{p}.o_proj.weight"), gpu)?
+            let o_key = format!("{p}.o_proj.weight");
+            if store.contains(&o_key) {
+                dense_auto(store, &o_key, gpu)?
+            } else {
+                // PrismaQuant export may omit o_proj.weight from safetensors
+                // for some layers. Check for NVFP4 packed variant as fallback.
+                let packed_key = format!("{p}.o_proj.weight_packed");
+                if store.contains(&packed_key) {
+                    tracing::warn!("Gemma-4 L{i}: {o_key} not found, using NVFP4 packed variant");
+                    use crate::weight_map::dequant_nvfp4_to_bf16;
+                    dequant_nvfp4_to_bf16(store, &format!("{p}.o_proj"), h, q_out_dim, gpu)?
+                } else {
+                    anyhow::bail!(
+                        "Gemma-4 L{i}: {o_key} not found in store and no packed variant available. \
+                         This PrismaQuant checkpoint has a stripped o_proj tensor — \
+                         the model cannot load this layer."
+                    );
+                }
+            }
         };
         if is_full_attn {
             tracing::info!("L{i}: full attention (Q_dim={q_out_dim}, K_dim={kv_out_dim}, K=V)");
@@ -367,7 +388,17 @@ pub(super) fn load_layers_impl(
 
         // ── MoE experts (Gemma-4 26B) — extracted to loader_b ──
         let moe_ffn = build_moe_ffn(
-            store, &lp, i, config, gpu, variant, qctx, h, absmax_k, quantize_k, stream,
+            store,
+            &lp,
+            i,
+            config,
+            gpu,
+            layer_variant,
+            qctx,
+            h,
+            absmax_k,
+            quantize_k,
+            stream,
         )?;
 
         tracing::info!("L{i}: building attention layer...");
