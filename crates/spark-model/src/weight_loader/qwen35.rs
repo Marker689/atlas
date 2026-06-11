@@ -122,8 +122,14 @@ impl ModelWeightLoader for Qwen35WeightLoader {
     ) -> Result<Option<crate::layers::VisionEncoder>> {
         use crate::weight_map::dense_auto_fp8_or_bf16;
         let vcfg = match &config.vision {
-            Some(v) => v.clone(),
-            None => return Ok(None),
+            Some(v) => {
+                tracing::info!("load_vision_encoder: vision_config present, depth={}", v.depth);
+                v.clone()
+            },
+            None => {
+                tracing::info!("load_vision_encoder: vision_config absent, skipping");
+                return Ok(None);
+            },
         };
         // AEON-7's v2 NVFP4 re-quant (and other multimodal-preserved
         // checkpoints quantized via AutoModelForImageTextToText) keeps
@@ -156,6 +162,7 @@ impl ModelWeightLoader for Qwen35WeightLoader {
         let mut blocks = Vec::with_capacity(vcfg.depth);
         for i in 0..vcfg.depth {
             let bp = format!("{vp}.blocks.{i}");
+            tracing::info!("load_vision_encoder: loading block {i}/{}", vcfg.depth);
             blocks.push(crate::layers::ViTBlock {
                 norm1_w: dense(store, &format!("{bp}.norm1.weight"))?.weight,
                 norm1_b: dense(store, &format!("{bp}.norm1.bias"))?.weight,
