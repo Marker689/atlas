@@ -106,15 +106,21 @@ impl QuantFormat for CompressedTensorsFormat {
         for (format_name, targets) in &self.config_groups {
             for pattern in targets {
                 if module_matches_pattern(module_path, pattern) {
-                    if let Some(variant) = format_to_variant(format_name) {
-                        tracing::debug!(
-                            "Mixed-precision: {module_path} → {format_name} ({variant:?})"
+                    if let Some(_variant) = format_to_variant(format_name) {
+                        // Always route through CompressedTensors when config_groups
+                        // are present, so quantized_any() can perform per-tensor
+                        // runtime detection (NVFP4 / MXFP8 / per-channel FP8 / BF16).
+                        // format_to_variant() is a best-guess from the group name;
+                        // the actual tensor metadata in quantized_any() is authoritative.
+                        tracing::info!(
+                            "Mixed-precision: {module_path} → {format_name} \
+                             (deferred to runtime detection via CompressedTensors)"
                         );
-                        return variant;
+                        return Nvfp4Variant::CompressedTensors;
                     }
                     // Unknown format — fall through to base variant
-                    tracing::debug!(
-                        "Mixed-precision: {module_path} matched unknown format {format_name}, using base"
+                    tracing::warn!(
+                        "Mixed-precision: {module_path} matched UNKNOWN format \"{format_name}\", falling back to base variant"
                     );
                     break;
                 }

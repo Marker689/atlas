@@ -233,11 +233,36 @@ pub(crate) fn quantized_any(
         && !has_scale_inv
         && !is_per_channel_scale;
 
+    // Diagnostic: when MXFP8-like tensors (weight + weight_scale, no packed)
+    // are present but MXFP8 detection didn't fire, the weights will be
+    // misrouted to the wrong dequant path, producing garbage output.
+    let has_mxfp8_like = matches!(variant, Nvfp4Variant::CompressedTensors)
+        && has_weight
+        && has_scale
+        && !has_packed
+        && !has_scale_inv;
+    if has_mxfp8_like && !is_mxfp8 {
+        if is_per_channel_scale {
+            tracing::warn!(
+                "{prefix}: MXFP8-like tensors present (weight + weight_scale, no packed), \
+                 but weight_scale is per-channel [N,≤1]. Routing as Fp8Dequanted (per-channel FP8). \
+                 MXFP8 expects E8M0 block scales [N, K/32] — if this IS MXFP8, output will be garbled."
+            );
+        } else {
+            tracing::warn!(
+                "{prefix}: MXFP8-like tensors present (weight + weight_scale, no packed), \
+                 but MXFP8 detection failed. Routing as base variant (CompressedTensors → \
+                 quantized_v2). If quantized_v2 panics on missing weight_packed, the model \
+                 won't load. If it loads, output will be garbled."
+            );
+        }
+    }
+
     let effective_variant = if has_only_dense && !matches!(variant, Nvfp4Variant::Bf16Raw) {
         tracing::debug!("{prefix}: no quantization metadata; falling back to runtime BF16→NVFP4");
         Nvfp4Variant::Bf16Raw
     } else if is_mxfp8 {
-        tracing::debug!(
+        tracing::info!(
             "{prefix}: detected MXFP8 format (CompressedTensors + weight/scale, no packed)"
         );
         Nvfp4Variant::MxFp8

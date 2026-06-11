@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use atlas_core::config::{LayerType, ModelConfig};
 use spark_runtime::gpu::GpuBackend;
 use spark_runtime::kv_cache::KvCacheDtype;
@@ -13,9 +13,9 @@ use crate::quant_format::detect_quant_format;
 use crate::tp_shard::{TpShardKind, load_qkvo_tp, shard_dense_bf16, shard_quantized_nvfp4};
 use crate::weight_map::{
     AttentionWeights, DenseWeight, MtpWeights, Nvfp4Variant, QuantizeCtx, SsmWeights, dense,
-    dense_auto, dense_f32_safe, dense_keep_f32, dequant_nvfp4_to_bf16, detect_nvfp4_variant,
-    gpu_concat_rows, interleave_ba, load_dense_ffn, load_kv_scales, load_mtp, load_ssm_qwen35,
-    quantize_to_nvfp4, quantized_any,
+    dense_auto, dense_auto_fp8_or_bf16, dense_f32_safe, dense_keep_f32, dequant_nvfp4_to_bf16,
+    detect_nvfp4_variant, gpu_concat_rows, interleave_ba, load_dense_ffn, load_kv_scales,
+    load_mtp, load_ssm_qwen35, quantize_to_nvfp4, quantized_any,
 };
 
 pub struct Qwen35DenseWeightLoader;
@@ -459,6 +459,108 @@ impl ModelWeightLoader for Qwen35DenseWeightLoader {
         );
 
         Ok(layers)
+    }
+
+    fn load_vision_encoder(
+        &self,
+        store: &WeightStore,
+        config: &ModelConfig,
+        gpu: &dyn GpuBackend,
+    ) -> Result<Option<crate::layers::VisionEncoder>> {
+        let vcfg = match &config.vision {
+            Some(v) => v.clone(),
+            None => return Ok(None),
+        };
+        // Probe canonical `model.visual.*` + nested `model.language_model.visual.*`
+        // (used by AEON-7 re-quant and multimodal-preserved checkpoints).
+        let vp = if store.contains("model.visual.patch_embed.proj.weight") {
+            "model.visual"
+        } else if store.contains("model.language_model.visual.patch_embed.proj.weight") {
+            "model.language_model.visual"
+        } else {
+            tracing::warn!(
+                "Vision encoder tensors absent under both `model.visual.*` and \
+                 `model.language_model.visual.*`; skipping vision tower (text-only mode)"
+            );
+            return Ok(None);
+        };
+
+        // Patch embed + position embed (PrismaQuant may quantize these; dense_auto handles all dtypes).
+        let patch_embed_w = dense_auto(store, &format!("{vp}.patch_embed.proj.weight"), gpu)?;
+        let patch_embed_b = dense(store, &format!("{vp}.patch_embed.proj.bias"))?;
+        let pos_embed = dense_auto(store, &format!("{vp}.pos_embed.weight"), gpu)?;
+        let pos_embed_shape = store.get(&format!("{vp}.pos_embed.weight"))?.shape.clone();
+        let num_position_embeddings = pos_embed_shape
+            .first()
+            .copied()
+            .context("pos_embed shape missing rows")?;
+
+        let mut blocks = Vec::with_capacity(vcfg.depth);
+        for i in 0..vcfg.depth {
+            let bp = format!("{vp}.blocks.{i}");
+            blocks.push(crate::layers::ViTBlock {
+                norm1_w: dense(store, &format!("{bp}.norm1.weight"))?.weight,
+                norm1_b: dense(store, &format!("{bp}.norm1.bias"))?.weight,
+                qkv_w: dense_auto_fp8_or_bf16(store, &format!("{bp}.attn.qkv"), gpu)?.weight,
+                qkv_b: dense(store, &format!("{bp}.attn.qkv.bias"))?.weight,
+                proj_w: dense_auto_fp8_or_bf16(store, &format!("{bp}.attn.proj"), gpu)?.weight,
+                proj_b: dense(store, &format!("{bp}.attn.proj.bias"))?.weight,
+                norm2_w: dense(store, &format!("{bp}.norm2.weight"))?.weight,
+                norm2_b: dense(store, &format!("{bp}.norm2.bias"))?.weight,
+                fc1_w: dense_auto_fp8_or_bf16(store, &format!("{bp}.mlp.linear_fc1"), gpu)?.weight,
+                fc1_b: dense(store, &format!("{bp}.mlp.linear_fc1.bias"))?.weight,
+                fc2_w: dense_auto_fp8_or_bf16(store, &format!("{bp}.mlp.linear_fc2"), gpu)?.weight,
+                fc2_b: dense(store, &format!("{bp}.mlp.linear_fc2.bias"))?.weight,
+            });
+        }
+
+        let mut deepstack = Vec::with_capacity(vcfg.deepstack_visual_indexes.len());
+        for i in 0..vcfg.deepstack_visual_indexes.len() {
+            let mp = format!("{vp}.deepstack_merger_list.{i}");
+            deepstack.push(crate::layers::MergerLayer {
+                norm_w: dense(store, &format!("{mp}.norm.weight"))?.weight,
+                norm_b: dense(store, &format!("{mp}.norm.bias"))?.weight,
+                fc1_w: dense_auto_fp8_or_bf16(store, &format!("{mp}.linear_fc1"), gpu)?.weight,
+                fc1_b: dense(store, &format!("{mp}.linear_fc1.bias"))?.weight,
+                fc2_w: dense_auto_fp8_or_bf16(store, &format!("{mp}.linear_fc2"), gpu)?.weight,
+                fc2_b: dense(store, &format!("{mp}.linear_fc2.bias"))?.weight,
+            });
+        }
+
+        let mp = format!("{vp}.merger");
+        let merger = crate::layers::MergerLayer {
+            norm_w: dense(store, &format!("{mp}.norm.weight"))?.weight,
+            norm_b: dense(store, &format!("{mp}.norm.bias"))?.weight,
+            fc1_w: dense_auto_fp8_or_bf16(store, &format!("{mp}.linear_fc1"), gpu)?.weight,
+            fc1_b: dense(store, &format!("{mp}.linear_fc1.bias"))?.weight,
+            fc2_w: dense_auto_fp8_or_bf16(store, &format!("{mp}.linear_fc2"), gpu)?.weight,
+            fc2_b: dense(store, &format!("{mp}.linear_fc2.bias"))?.weight,
+        };
+
+        let deepstack_indexes = vcfg.deepstack_visual_indexes.clone();
+        let ve = crate::layers::VisionEncoder::new(
+            patch_embed_w.weight,
+            patch_embed_b.weight,
+            pos_embed.weight,
+            num_position_embeddings,
+            blocks,
+            deepstack,
+            deepstack_indexes,
+            merger,
+            vcfg.hidden_size,
+            vcfg.num_heads,
+            vcfg.spatial_merge_size,
+            vcfg.out_hidden_size,
+            vcfg.intermediate_size,
+            gpu,
+        )?;
+        tracing::info!(
+            "Qwen3.6 vision encoder loaded: depth={}, hidden={}, heads={}, FP8-blocks>=4",
+            vcfg.depth,
+            vcfg.hidden_size,
+            vcfg.num_heads,
+        );
+        Ok(Some(ve))
     }
 
     fn load_embedding(&self, store: &WeightStore, config: &ModelConfig) -> Result<DenseWeight> {
