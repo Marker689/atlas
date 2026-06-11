@@ -5,6 +5,13 @@
 use super::*;
 
 impl Qwen3SsmLayer {
+    /// Disable the f32 GDN decode kernel, forcing the BF16 fallback path.
+    /// Used for MXFP8-sourced SSM weights where the f32 kernel's accumulation
+    /// order diverges from vLLM's reference, causing progressive thinking drift.
+    pub(crate) fn disable_gdn_f32(&mut self) {
+        self.gdn_f32_k = KernelHandle(0);
+    }
+
     pub(super) fn ssm_forward(
         &self,
         normed: DevicePtr,

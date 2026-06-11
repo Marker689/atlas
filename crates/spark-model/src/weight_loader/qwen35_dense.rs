@@ -434,6 +434,7 @@ impl ModelWeightLoader for Qwen35DenseWeightLoader {
                     )?;
                     if keep_bf16 {
                         layer.out_proj_dense = Some(out_proj_dense);
+                        layer.disable_gdn_f32();
                     }
                     layer.predequant_for_prefill(gpu, config, stream)?;
                     // Install the FP8 prefill weights AFTER `predequant_for_prefill`

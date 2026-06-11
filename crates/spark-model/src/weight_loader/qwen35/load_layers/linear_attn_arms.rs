@@ -380,6 +380,7 @@ pub(super) fn build_linear_attention_nvfp4(
     )?;
     if is_mxfp8 {
         layer.out_proj_dense = Some(ssm35.out_proj);
+        layer.disable_gdn_f32();
     }
     layer.predequant_for_prefill(gpu, config, stream)?;
     // Install native FP8 prefill weights AFTER `predequant_for_prefill`
