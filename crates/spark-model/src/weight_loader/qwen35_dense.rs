@@ -402,8 +402,15 @@ impl ModelWeightLoader for Qwen35DenseWeightLoader {
                     // out_proj; the BF16 qkvz_dense / out_proj_dense were only quantize
                     // inputs. Free them rather than keep a third full-precision copy of
                     // the largest SSM tensor across every layer (Atlas issue #A1).
+                    // MXFP8-sourced SSM: keep out_proj_dense alive for dense_gemv decode.
+                    let keep_out_proj = matches!(layer_variant, Nvfp4Variant::MxFp8);
+                    if keep_out_proj {
+                        layer.out_proj_dense = Some(out_proj_dense);
+                    }
                     gpu.free(qkvz_dense.weight)?;
-                    gpu.free(out_proj_dense.weight)?;
+                    if !keep_out_proj {
+                        gpu.free(out_proj_dense.weight)?;
+                    }
 
                     let ssm = SsmWeights {
                         in_proj_qkvz: DenseWeight {
@@ -437,12 +444,6 @@ impl ModelWeightLoader for Qwen35DenseWeightLoader {
                     // fallback (the `qkvz_nvfp4*` fields above).
                     if qkvz_fp8_prefill.is_some() || out_proj_fp8_prefill.is_some() {
                         layer.set_fp8_prefill_only_weights(qkvz_fp8_prefill, out_proj_fp8_prefill);
-                    }
-                    if matches!(layer_variant, Nvfp4Variant::MxFp8) {
-                        layer.out_proj_dense = Some(out_proj_dense);
-                        tracing::info!(
-                            "SSM[{lp}] MXFP8→BF16: out_proj routed through dense_gemv (skip NVFP4)"
-                        );
                     }
                     layers.push(Box::new(layer));
                 }
