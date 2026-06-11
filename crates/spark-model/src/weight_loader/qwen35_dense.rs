@@ -438,6 +438,12 @@ impl ModelWeightLoader for Qwen35DenseWeightLoader {
                     if qkvz_fp8_prefill.is_some() || out_proj_fp8_prefill.is_some() {
                         layer.set_fp8_prefill_only_weights(qkvz_fp8_prefill, out_proj_fp8_prefill);
                     }
+                    if matches!(layer_variant, Nvfp4Variant::MxFp8) {
+                        layer.out_proj_dense = Some(out_proj_dense);
+                        tracing::info!(
+                            "SSM[{lp}] MXFP8→BF16: out_proj routed through dense_gemv (skip NVFP4)"
+                        );
+                    }
                     layers.push(Box::new(layer));
                 }
                 LayerType::SlidingAttention => {
