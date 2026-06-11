@@ -139,7 +139,8 @@ pub fn build_model(
     // ── Step 3: LM-head quantization (NVFP4 / FP8 / BF16-skip) + the
     // draft-only NVFP4 head for MTP — extracted to lm_head_setup.rs
     // (file-size cap; pure code move).
-    let (lm_head_nvfp4, lm_head_fp8, mtp_lm_head_nvfp4) = super::lm_head_setup::setup_lm_heads(
+    let (lm_head_nvfp4, lm_head_fp8, mtp_lm_head_nvfp4, lm_head_bf16_dequant) =
+        super::lm_head_setup::setup_lm_heads(
         store,
         &lm_head,
         &config,
@@ -347,11 +348,17 @@ pub fn build_model(
     let target_lm_head_for_dflash = lm_head.weight;
     let target_hidden_for_dflash = config.hidden_size;
 
+    let lm_head_for_model = if let Some(dequant) = lm_head_bf16_dequant {
+        dequant
+    } else {
+        lm_head
+    };
+
     let mut model = TransformerModel::new(
         config,
         embed,
         final_norm,
-        lm_head,
+        lm_head_for_model,
         lm_head_nvfp4,
         lm_head_fp8,
         mtp_lm_head_nvfp4,

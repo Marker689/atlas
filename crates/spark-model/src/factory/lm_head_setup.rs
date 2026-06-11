@@ -12,7 +12,7 @@ use atlas_core::config::ModelConfig;
 use spark_runtime::gpu::GpuBackend;
 use spark_runtime::weights::WeightStore;
 
-use crate::weight_map::{Fp8DenseWeight, quantize_to_fp8, quantize_to_nvfp4};
+use crate::weight_map::{Fp8DenseWeight, dequant_nvfp4_to_bf16, quantize_to_fp8, quantize_to_nvfp4};
 
 #[allow(clippy::type_complexity)]
 pub(super) fn setup_lm_heads(
@@ -26,6 +26,7 @@ pub(super) fn setup_lm_heads(
     Option<crate::weight_map::QuantizedWeight>,
     Option<Fp8DenseWeight>,
     Option<crate::weight_map::QuantizedWeight>,
+    Option<crate::weight_map::DenseWeight>,
 )> {
     // ── Step 3: Quantize LM head to NVFP4 for fast decode ──
     let absmax_k = gpu.kernel("quantize_nvfp4", "nvfp4_global_absmax")?;
@@ -66,24 +67,22 @@ pub(super) fn setup_lm_heads(
     // per-row scales, w8a16_gemv decode) instead of NVFP4. Additive: when
     // `config.lm_head_fp8` is false the NVFP4/BF16 paths below are unchanged.
     let mut lm_head_fp8: Option<Fp8DenseWeight> = None;
+    let mut lm_head_bf16_dequant: Option<crate::weight_map::DenseWeight> = None;
     let lm_head_nvfp4 = if lm_head_prepacked_nvfp4 {
-        // Checkpoint constraint, not a preference: there is NO BF16 lm_head
-        // tensor on disk, so neither the BF16-skip path (reads vocab*hidden
-        // BF16 from a half-size packed buffer) nor a runtime FP8/NVFP4
-        // requantize can be honored. Load the packed head directly; warn if
-        // the user asked for something else.
-        if config.skip_lm_head_quantization() || config.lm_head_fp8 {
-            tracing::warn!(
-                "--lm-head-dtype override ignored: this checkpoint ships lm_head                  pre-packed as NVFP4 (no BF16 tensor exists to keep or requantize);                  using the packed NVFP4 head"
-            );
-        }
         let prefix = lm_head_key.unwrap().strip_suffix(".weight").unwrap();
-        let q = crate::weight_map::quantized(store, prefix, gpu)?;
+        let bf16 = crate::weight_map::dequant_nvfp4_to_bf16(
+            store,
+            prefix,
+            config.vocab_size,
+            config.hidden_size,
+            gpu,
+        )?;
         tracing::info!(
-            "LM head loaded as pre-packed NVFP4 (vocab={}, skipped requantize)",
+            "LM head dequantized from pre-packed NVFP4 to BF16 (vocab={})",
             config.vocab_size
         );
-        Some(q)
+        lm_head_bf16_dequant = Some(bf16);
+        None
     } else if config.skip_lm_head_quantization() {
         tracing::info!("LM head kept as BF16 (skip NVFP4 quantization per model config)");
         None
@@ -153,5 +152,5 @@ pub(super) fn setup_lm_heads(
     } else {
         None
     };
-    Ok((lm_head_nvfp4, lm_head_fp8, mtp_lm_head_nvfp4))
+    Ok((lm_head_nvfp4, lm_head_fp8, mtp_lm_head_nvfp4, lm_head_bf16_dequant))
 }
