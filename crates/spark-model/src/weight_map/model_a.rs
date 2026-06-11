@@ -138,7 +138,7 @@ pub(crate) fn dense_auto_fp8_or_bf16(
     let packed_key = format!("{prefix}.weight_packed");
     if store.contains(&packed_key) && !store.contains(&weight_key) {
         let scale = store.get(&format!("{prefix}.weight_scale"))?;
-        let total = scale.shape[0] * 16; // NVFP4: 16 elts per group, n*k = num_groups * 16
+        let total = scale.num_elements() * 16; // NVFP4: 16 elts per group, handle 1D and 2D scales
         return dequant_nvfp4_to_bf16(store, prefix, total, 1, gpu);
     }
     let w = store.get(&weight_key)?;

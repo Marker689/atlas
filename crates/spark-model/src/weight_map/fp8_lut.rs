@@ -325,8 +325,10 @@ pub(crate) fn load_mtp_qwen35(
     hidden_size: usize,
     intermediate_size: usize,
     kv_proj_dim: usize,
+    num_attention_heads: usize,
+    head_dim: usize,
 ) -> Result<MtpWeights> {
-    load_mtp(store, num_experts, gpu, variant, hidden_size, intermediate_size, kv_proj_dim)
+    load_mtp(store, num_experts, gpu, variant, hidden_size, intermediate_size, kv_proj_dim, num_attention_heads, head_dim)
 }
 
 /// GPU-concatenate two weight matrices row-wise: [A; B] → [A_rows + B_rows, K].

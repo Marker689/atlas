@@ -479,7 +479,7 @@ impl ModelWeightLoader for Qwen3WeightLoader {
         }
         let variant = detect_nvfp4_variant(store, config);
         tracing::info!("Loading MTP weights (variant={:?})...", variant);
-        match load_mtp(store, config.num_experts, gpu, variant, config.hidden_size, config.intermediate_size, config.num_key_value_heads * config.head_dim) {
+        match load_mtp(store, config.num_experts, gpu, variant, config.hidden_size, config.intermediate_size, config.num_key_value_heads * config.head_dim, config.num_attention_heads, config.head_dim) {
             Ok(mtp) => {
                 tracing::info!(
                     "MTP weights loaded: fc=[2048,4096], {} experts, attn layer",

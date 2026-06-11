@@ -193,6 +193,8 @@ pub(crate) fn load_mtp(
     hidden_size: usize,
     intermediate_size: usize,
     kv_proj_dim: usize,
+    num_attention_heads: usize,
+    head_dim: usize,
 ) -> Result<MtpWeights> {
     // PrismaQuant checkpoints use either HF naming (mtp.*) or vLLM naming
     // (language_model.mtp.*). Detect which prefix the tensors actually use.
@@ -264,15 +266,18 @@ pub(crate) fn load_mtp(
         let null = DenseWeight {
             weight: DevicePtr::NULL,
         };
+        // MTP attention: q_proj doubled Q rows (nq * hd * 2), o_proj output (nq * hd).
+        let q_dim = num_attention_heads * head_dim * 2;
+        let o_out = num_attention_heads * head_dim;
         return Ok(MtpWeights {
             pre_fc_norm_embedding: dense(store, &mtp_key("mtp.pre_fc_norm_embedding.weight"))?,
             pre_fc_norm_hidden: dense(store, &mtp_key("mtp.pre_fc_norm_hidden.weight"))?,
             fc: load_mtp_dense(store, &mtp_key("mtp.fc.weight"), gpu, variant, hidden_size, 2 * hidden_size)?,
             input_layernorm: dense(store, &mtp_key("mtp.layers.0.input_layernorm.weight"))?,
-            q_proj: load_mtp_dense(store, &format!("{p}.q_proj.weight"), gpu, variant, hidden_size, hidden_size)?,
+            q_proj: load_mtp_dense(store, &format!("{p}.q_proj.weight"), gpu, variant, q_dim, hidden_size)?,
             k_proj: load_mtp_dense(store, &format!("{p}.k_proj.weight"), gpu, variant, kv_proj_dim, hidden_size)?,
             v_proj: load_mtp_dense(store, &format!("{p}.v_proj.weight"), gpu, variant, kv_proj_dim, hidden_size)?,
-            o_proj: load_mtp_dense(store, &format!("{p}.o_proj.weight"), gpu, variant, hidden_size, hidden_size)?,
+            o_proj: load_mtp_dense(store, &format!("{p}.o_proj.weight"), gpu, variant, hidden_size, o_out)?,
             q_norm: dense(store, &format!("{p}.q_norm.weight"))?,
             k_norm: dense(store, &format!("{p}.k_norm.weight"))?,
             post_attn_layernorm: dense(store, &mtp_key("mtp.layers.0.post_attention_layernorm.weight"))?,
@@ -341,10 +346,10 @@ pub(crate) fn load_mtp(
         pre_fc_norm_hidden: dense(store, &mtp_key("mtp.pre_fc_norm_hidden.weight"))?,
         fc: load_mtp_dense(store, &mtp_key("mtp.fc.weight"), gpu, variant, hidden_size, 2 * hidden_size)?,
         input_layernorm: dense(store, &mtp_key("mtp.layers.0.input_layernorm.weight"))?,
-        q_proj: load_mtp_dense(store, &format!("{p}.q_proj.weight"), gpu, variant, hidden_size, hidden_size)?,
-        k_proj: load_mtp_dense(store, &format!("{p}.k_proj.weight"), gpu, variant, hidden_size, hidden_size)?,
-        v_proj: load_mtp_dense(store, &format!("{p}.v_proj.weight"), gpu, variant, hidden_size, hidden_size)?,
-        o_proj: load_mtp_dense(store, &format!("{p}.o_proj.weight"), gpu, variant, hidden_size, hidden_size)?,
+        q_proj: load_mtp_dense(store, &format!("{p}.q_proj.weight"), gpu, variant, q_dim, hidden_size)?,
+        k_proj: load_mtp_dense(store, &format!("{p}.k_proj.weight"), gpu, variant, kv_proj_dim, hidden_size)?,
+        v_proj: load_mtp_dense(store, &format!("{p}.v_proj.weight"), gpu, variant, kv_proj_dim, hidden_size)?,
+        o_proj: load_mtp_dense(store, &format!("{p}.o_proj.weight"), gpu, variant, hidden_size, o_out)?,
         q_norm: dense(store, &format!("{p}.q_norm.weight"))?,
         k_norm: dense(store, &format!("{p}.k_norm.weight"))?,
         post_attn_layernorm: dense(store, &mtp_key("mtp.layers.0.post_attention_layernorm.weight"))?,
