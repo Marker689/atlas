@@ -24,7 +24,7 @@ use crate::layer::TransformerLayer;
 use crate::layers::vision_encoder::VisionEncoder;
 use crate::quant_format::detect_quant_format;
 use crate::weight_loader::ModelWeightLoader;
-use crate::weight_map::{DenseWeight, MtpWeights, Nvfp4Variant, dense};
+use crate::weight_map::{DenseWeight, MtpWeights, dense};
 
 mod ctx;
 mod phase_assemble;

@@ -93,7 +93,7 @@ pub(super) fn load_layers(
     } else {
         QuantFormat::Nvfp4
     };
-    let native_fp8_global = quant_format_runtime == QuantFormat::Fp8;
+    let _native_fp8_global = quant_format_runtime == QuantFormat::Fp8;
     tracing::info!(
         "Weight format: {:?}, NVFP4 variant: {:?}, quant_format: {:?}",
         weight_format,

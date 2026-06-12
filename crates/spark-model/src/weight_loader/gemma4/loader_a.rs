@@ -15,8 +15,8 @@ use crate::layers::{DenseFfnLayer, FfnActivation, FfnComponent, Qwen3AttentionLa
 use crate::quant_format::detect_quant_format;
 use crate::tp_shard::{TpShardKind, shard_dense_bf16};
 use crate::weight_map::{
-    AttentionWeights, Nvfp4Variant, QuantizeCtx, dense, dense_auto, detect_nvfp4_variant,
-    load_kv_scales, quantize_to_nvfp4, quantized_any,
+    AttentionWeights, DenseWeight, Nvfp4Variant, QuantizeCtx, dense, dense_auto,
+    detect_nvfp4_variant, load_kv_scales, quantize_to_nvfp4, quantized_any,
 };
 
 pub(super) fn load_layers_impl(

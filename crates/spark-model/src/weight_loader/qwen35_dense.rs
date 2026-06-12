@@ -421,7 +421,7 @@ impl ModelWeightLoader for Qwen35DenseWeightLoader {
                         Some(out_proj_nvfp4_t),
                         config,
                         gpu,
-                    )?
+                    )?;
                     layer.predequant_for_prefill(gpu, config, stream)?;
                     // Install the FP8 prefill weights AFTER `predequant_for_prefill`
                     // (which sets `out_proj_fp8` from NVFP4 + scale2). The

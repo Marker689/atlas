@@ -10,7 +10,7 @@ use crate::layer::TransformerLayer;
 use crate::layers::dense_ffn::DenseFfnWeights;
 use crate::layers::{DenseFfnLayer, FfnComponent, MoeLayer, Qwen3AttentionLayer};
 use crate::weight_map::{
-    AttentionWeights, DenseWeight, ExpertWeight, MoeWeights, Nvfp4Variant, QuantizedWeight, dense,
+    AttentionWeights, DenseWeight, ExpertWeight, MoeWeights, QuantizedWeight, dense,
     dense_auto, detect_nvfp4_variant, load_kv_scales, quantize_to_nvfp4,
 };
 use crate::quant_format::detect_quant_format;
