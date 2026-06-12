@@ -141,6 +141,7 @@ extern "C" __global__ void gated_delta_rule_decode(
         // Steps 3+4 fused: State update + output dot product in single pass.
         // Coalesced reads/writes: all threads access H[j][0..v_dim-1] consecutively.
         float q_dot = 0.0f;
+        float q_c = 0.0f;
         #pragma unroll 4
         for (unsigned int j = 0; j < k_dim; j += 4) {
             float h0 = H[(j + 0) * v_dim + tid];
