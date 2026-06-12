@@ -118,14 +118,18 @@ extern "C" __global__ void gated_delta_rule_decode(
 
         // Step 1: hk_dot = sum_j H[j][tid] * k[j] — coalesced reads
         float hk_dot = 0.0f;
+        float hk_c = 0.0f;
         #pragma unroll 4
         for (unsigned int j = 0; j < k_dim; j += 4) {
             float h0 = H[(j + 0) * v_dim + tid];
             float h1 = H[(j + 1) * v_dim + tid];
             float h2 = H[(j + 2) * v_dim + tid];
             float h3 = H[(j + 3) * v_dim + tid];
-            hk_dot += h0 * smem_k[j] + h1 * smem_k[j + 1]
-                    + h2 * smem_k[j + 2] + h3 * smem_k[j + 3];
+            float y, t;
+            y = h0 * smem_k[j] - hk_c;      t = hk_dot + y;  hk_c = (t - hk_dot) - y;  hk_dot = t;
+            y = h1 * smem_k[j + 1] - hk_c;  t = hk_dot + y;  hk_c = (t - hk_dot) - y;  hk_dot = t;
+            y = h2 * smem_k[j + 2] - hk_c;  t = hk_dot + y;  hk_c = (t - hk_dot) - y;  hk_dot = t;
+            y = h3 * smem_k[j + 3] - hk_c;  t = hk_dot + y;  hk_c = (t - hk_dot) - y;  hk_dot = t;
         }
 
         // Step 2: Gated residual value
@@ -599,7 +603,8 @@ extern "C" __global__ void gated_delta_rule_prefill(
 
             float v_new_i = (v_i - g_t * hk_dot) * bt;
 
-            float q_dot = 0.0f;
+        float q_dot = 0.0f;
+        float q_c = 0.0f;
             #pragma unroll 4
             for (unsigned int j = 0; j < k_dim; j += 4) {
                 float h0 = g_t * H_smem[(j + 0) * v_dim + tid] + smem_k[j]     * v_new_i;
@@ -615,7 +620,6 @@ extern "C" __global__ void gated_delta_rule_prefill(
             y = h1 * smem_q[j + 1] - q_c;   t = q_dot + y;  q_c = (t - q_dot) - y;  q_dot = t;
             y = h2 * smem_q[j + 2] - q_c;   t = q_dot + y;  q_c = (t - q_dot) - y;  q_dot = t;
             y = h3 * smem_q[j + 3] - q_c;   t = q_dot + y;  q_c = (t - q_dot) - y;  q_dot = t;
-                       + h2 * smem_q[j + 2] + h3 * smem_q[j + 3];
             }
 
             output[((b * seq_len + t) * num_v_heads + vh) * v_dim + tid] =
