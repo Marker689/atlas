@@ -23,6 +23,7 @@ pub(super) struct MistralLayerCtx<'a> {
     pub quantize_k: spark_runtime::gpu::KernelHandle,
     pub stream: u64,
     pub layer_idx: usize,
+    #[allow(dead_code)]
     pub layer_variant: Nvfp4Variant,
 
     // Cached config scalars (avoid re-derefing config field by field).
