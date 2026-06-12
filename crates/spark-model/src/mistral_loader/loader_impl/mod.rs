@@ -22,8 +22,9 @@ use spark_runtime::weights::WeightStore;
 use super::MistralWeightLoader;
 use crate::layer::TransformerLayer;
 use crate::layers::vision_encoder::VisionEncoder;
+use crate::quant_format::detect_quant_format;
 use crate::weight_loader::ModelWeightLoader;
-use crate::weight_map::{DenseWeight, MtpWeights, dense};
+use crate::weight_map::{DenseWeight, MtpWeights, Nvfp4Variant, dense};
 
 mod ctx;
 mod phase_assemble;
@@ -133,9 +134,14 @@ impl MistralWeightLoader {
         let mut layers: Vec<Box<dyn TransformerLayer>> = Vec::with_capacity(n);
         let mut yarn_inv_freq_shared = spark_runtime::gpu::DevicePtr::NULL;
 
+        let quant_format = detect_quant_format(config, store);
+
         for i in 0..n {
-            let mut ctx =
-                ctx::MistralLayerCtx::new(store, config, gpu, absmax_k, quantize_k, stream, i);
+            let lp = config.layer_prefix(i);
+            let layer_variant = quant_format.variant_for(&lp);
+            let mut ctx = ctx::MistralLayerCtx::new(
+                store, config, gpu, absmax_k, quantize_k, stream, i, layer_variant,
+            );
             phase_lora_qkv::load_lora_qkv(&mut ctx)?;
             phase_per_head::build_per_head_views(&mut ctx)?;
             phase_qk_absorbed::build_w_qk_absorbed(&mut ctx)?;

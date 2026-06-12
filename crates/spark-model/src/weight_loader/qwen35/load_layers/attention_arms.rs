@@ -119,20 +119,19 @@ pub(super) fn build_full_attention_nvfp4(
                  -> Result<(DenseWeight, crate::weight_map::QuantizedWeight)> {
                     let full_prefix = format!("{p}.{name}");
                     let src = dequant_mxfp8_to_bf16(store, &full_prefix, gpu)?;
-                    let (sharded_ptr, local_n, local_k) =
-                        shard_dense_bf16(src.weight, full_n, full_k, kind, tp_rank, tp_size, gpu)?;
-                    let sharded = DenseWeight {
-                        weight: sharded_ptr,
-                    };
+                    let (sharded_ptr, local_n, local_k) = shard_dense_bf16(
+                        src.weight, full_n, full_k, kind, tp_rank, tp_size, gpu,
+                    )?;
+                    let sharded = DenseWeight { weight: sharded_ptr };
                     let nvfp4 = quantize_to_nvfp4(
                         &sharded, local_n, local_k, gpu, absmax_k, quantize_k, stream,
                     )?;
-                    gpu.free(sharded.weight)?;
+                    if sharded_ptr != src.weight {
+                        gpu.free(sharded_ptr)?;
+                    }
                     gpu.free(src.weight)?;
                     Ok((
-                        DenseWeight {
-                            weight: DevicePtr::NULL,
-                        },
+                        DenseWeight { weight: DevicePtr::NULL },
                         nvfp4,
                     ))
                 };

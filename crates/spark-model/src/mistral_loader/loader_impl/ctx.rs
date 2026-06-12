@@ -10,6 +10,7 @@ use spark_runtime::gpu::{DevicePtr, GpuBackend};
 use spark_runtime::weights::WeightStore;
 
 use crate::weight_map::DenseWeight;
+use crate::weight_map::Nvfp4Variant;
 
 /// Per-layer arena for the MLA loading pipeline. Owned by
 /// `load_one_layer`; phase fns mutate the optional fields as they fill in.
@@ -22,6 +23,7 @@ pub(super) struct MistralLayerCtx<'a> {
     pub quantize_k: spark_runtime::gpu::KernelHandle,
     pub stream: u64,
     pub layer_idx: usize,
+    pub layer_variant: Nvfp4Variant,
 
     // Cached config scalars (avoid re-derefing config field by field).
     pub h: usize,
@@ -74,6 +76,7 @@ impl<'a> MistralLayerCtx<'a> {
         quantize_k: spark_runtime::gpu::KernelHandle,
         stream: u64,
         layer_idx: usize,
+        layer_variant: Nvfp4Variant,
     ) -> Self {
         Self {
             store,
@@ -83,6 +86,7 @@ impl<'a> MistralLayerCtx<'a> {
             quantize_k,
             stream,
             layer_idx,
+            layer_variant,
             h: config.hidden_size,
             n_heads: config.num_attention_heads,
             n_kv: config.num_key_value_heads,

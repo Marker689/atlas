@@ -9,9 +9,10 @@ use spark_runtime::weights::WeightStore;
 use super::ModelWeightLoader;
 use crate::layer::TransformerLayer;
 use crate::layers::{FfnComponent, NemotronMamba2Layer, NemotronMoeLayer, Qwen3AttentionLayer};
+use crate::quant_format::detect_quant_format;
 use crate::tp_shard::{TpAttentionDims, TpShardKind, shard_dense_bf16, shard_quantized_nvfp4};
 use crate::weight_map::{
-    DenseWeight, MtpWeights, NemotronSsmQuant, dense, dequant_fp8_to_bf16_into,
+    DenseWeight, MtpWeights, NemotronSsmQuant, Nvfp4Variant, dense, dequant_fp8_to_bf16_into,
     load_nemotron_attention, load_nemotron_moe, load_nemotron_ssm, quantize_to_nvfp4,
 };
 
@@ -59,8 +60,27 @@ impl ModelWeightLoader for NemotronHWeightLoader {
         let scratch_bytes = scratch_elems * 2; // BF16 = 2 bytes
         let scratch = gpu.alloc(scratch_bytes)?;
 
+        // PrismaQuant mixed-precision: detect per-layer format dispatch from
+        // config_groups. Nemotron-H auto-detection (weight_scale_2-based)
+        // doesn't cover CompressedTensors format, so we warn when variant
+        // differs from auto-detection. Full CT support needs dequant paths
+        // in load_nemotron_{ssm,attention,moe}.
+        let quant_format = detect_quant_format(config, store);
+
         for (i, lt) in layer_types.iter().enumerate() {
             let lp = config.layer_prefix(i);
+            let layer_variant = quant_format.variant_for(&lp);
+            if matches!(
+                layer_variant,
+                Nvfp4Variant::CompressedTensors | Nvfp4Variant::MxFp8
+            ) {
+                anyhow::bail!(
+                    "L{i}: per-layer variant {layer_variant:?} — Nemotron-H auto-detection \
+                     (weight_scale_2-based) does NOT cover CompressedTensors/MXFP8 format. \
+                     PrismaQuant Nemotron checkpoints need full CT dequant support in \
+                     load_nemotron_* functions before they can be loaded.",
+                );
+            }
             let norm = dense(store, &format!("{lp}.norm.weight"))?;
 
             match lt {

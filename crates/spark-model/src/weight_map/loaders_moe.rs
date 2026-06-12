@@ -230,17 +230,27 @@ pub(crate) fn load_mtp(
         match variant {
             Nvfp4Variant::Fp8Dequanted => dense_auto(store, name, gpu),
             Nvfp4Variant::Bf16Raw => dense(store, name),
-            Nvfp4Variant::CompressedTensors | Nvfp4Variant::MxFp8 => {
+            Nvfp4Variant::MxFp8 => {
+                // MXFP8: use MXFP8 dequant for both .weight and .weight_packed.
                 if store.contains(name) {
                     return dense_auto(store, name, gpu);
                 }
-                // Try .weight_packed (NVFP4 compressed-tensors: per-expert weights, o_proj).
+                let packed_name = format!("{name}_packed");
+                if store.contains(&packed_name) {
+                    let prefix = name.strip_suffix(".weight").unwrap_or(name);
+                    return dequant_mxfp8_packed_to_bf16(store, prefix, gpu);
+                }
+                dense_auto(store, name, gpu)
+            }
+            Nvfp4Variant::CompressedTensors => {
+                if store.contains(name) {
+                    return dense_auto(store, name, gpu);
+                }
                 let packed_name = format!("{name}_packed");
                 if store.contains(&packed_name) {
                     let prefix = name.strip_suffix(".weight").unwrap_or(name);
                     return dequant_nvfp4_to_bf16(store, prefix, logical_n, logical_k, gpu);
                 }
-                // Fallback: try dense_auto for unrecognized formats (e.g. FP8).
                 dense_auto(store, name, gpu)
             }
             _ => dense(store, name),

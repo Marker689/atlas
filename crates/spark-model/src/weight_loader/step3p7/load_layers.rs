@@ -10,9 +10,10 @@ use crate::layer::TransformerLayer;
 use crate::layers::dense_ffn::DenseFfnWeights;
 use crate::layers::{DenseFfnLayer, FfnComponent, MoeLayer, Qwen3AttentionLayer};
 use crate::weight_map::{
-    AttentionWeights, DenseWeight, ExpertWeight, MoeWeights, QuantizedWeight, dense, dense_auto,
-    detect_nvfp4_variant, load_kv_scales, quantize_to_nvfp4,
+    AttentionWeights, DenseWeight, ExpertWeight, MoeWeights, Nvfp4Variant, QuantizedWeight, dense,
+    dense_auto, detect_nvfp4_variant, load_kv_scales, quantize_to_nvfp4,
 };
+use crate::quant_format::detect_quant_format;
 
 use super::{
     has_per_expert_tensors, load_fused_nvfp4, offset_norm_weights_plus_one, slice_fused_experts,
@@ -29,6 +30,7 @@ pub(super) fn load_layers(
     let stream = gpu.default_stream();
     let h = config.hidden_size;
     let variant = detect_nvfp4_variant(store, config);
+    let quant_format = detect_quant_format(config, store);
     let inter = config.moe_intermediate_size;
     let shared_inter = config.shared_expert_intermediate_size;
 
@@ -51,7 +53,12 @@ pub(super) fn load_layers(
 
     for i in 0..config.num_hidden_layers {
         let lp = format!("{prefix}.layers.{i}");
-        tracing::debug!("step3p7: layer {i}");
+        // Step3p7 is NVFP4 ModelOpt format only; per-layer variant dispatch
+        // is computed for forward-compatibility but not yet threaded to
+        // load_moe_ffn / load_attention_layer (both auto-detect from per-tensor
+        // weight_scale / weight_scale_2 convention).
+        let layer_variant = quant_format.variant_for(&lp);
+        tracing::debug!("step3p7: layer {i} variant={layer_variant:?}");
 
         let input_norm = dense(store, &format!("{lp}.input_layernorm.weight"))?;
         let post_attn_norm = dense(store, &format!("{lp}.post_attention_layernorm.weight"))?;

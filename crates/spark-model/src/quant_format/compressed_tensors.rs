@@ -112,9 +112,16 @@ impl QuantFormat for CompressedTensorsFormat {
                         );
                         return variant;
                     }
-                    // Unknown format — fall through to base variant
-                    tracing::debug!(
-                        "Mixed-precision: {module_path} matched unknown format {format_name}, using base"
+                    // Unknown format — fall through to base variant.
+                    // This is a configuration error: the quantization_config declares
+                    // a format name that format_to_variant() doesn't recognize.
+                    // Common causes: typo in format name, unsupported format string,
+                    // or a PrismaQuant format that needs a new arm in format_to_variant().
+                    tracing::warn!(
+                        "Mixed-precision: {module_path} matched UNKNOWN format '{format_name}' \
+                         — using base variant CompressedTensors. This may cause incorrect \
+                         weight loading if '{format_name}' should map to MxFp8 or Bf16Raw. \
+                         Known formats: nvfp4, mxfp8, bf16, float-quantized, fp8."
                     );
                     break;
                 }

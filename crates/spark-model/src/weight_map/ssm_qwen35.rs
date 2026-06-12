@@ -38,7 +38,6 @@ pub(crate) fn load_ssm_qwen35(
     layer_prefix: &str,
     gpu: &dyn GpuBackend,
     variant: Nvfp4Variant,
-    qctx: Option<QuantizeCtx>,
     h: usize,
     qkv_size: usize,
     z_size: usize,
@@ -56,62 +55,54 @@ pub(crate) fn load_ssm_qwen35(
     // kernels a 1-byte FP8 buffer where they expect 2-byte BF16 and the
     // downstream assembly D2D copy overran it (cuMemcpyDtoDAsync status 1,
     // issue #107). The same fix in `dense_auto` covers the self_attn path.
-    let load_proj = |name: &str| -> Result<DenseWeight> { dense_auto(store, name, gpu) };
 
     // PrismaQuant: SSM projections (in_proj_qkv, in_proj_z, out_proj) may be
     // NVFP4 on disk (CompressedTensors variant). Dequant to BF16 since
     // SsmWeightsQwen35 expects DenseWeight for all projections.
+    //
+    // Detection order (guard-clause style, each branch returns early):
+    //   1. No weight_packed → not NVFP4 on disk → dense_auto
+    //   2. Not a CompressedTensors/MxFp8 variant → dense_auto
+    //   3. Weight is FP8E4M3 (float-quantized / MXFP8 source, not NVFP4) → dense_auto
+    //   4. Confirmed NVFP4 → dequant to BF16, with dense_auto fallback
+    //
     // Use store.get().is_ok() not store.contains() — contains() checks the
     // safetensors index but the fast-loader may not have loaded the tensor
     // into GPU memory (pipeline edge case with >5000 tensors/shard).
     let load_ssm_proj = |proj_name: &str, n: usize, k: usize| -> Result<DenseWeight> {
         let prefix = format!("{p}.{proj_name}");
-        let has_ct_nvfp4 =
-            store.get(&format!("{prefix}.weight_packed")).is_ok()
-                && store.get(&format!("{prefix}.weight_scale")).is_ok();
-        let has_std_nvfp4 = store.get(&format!("{prefix}.weight")).is_ok()
-            && store.get(&format!("{prefix}.weight_scale")).is_ok();
-        let has_nvfp4 = has_ct_nvfp4 || has_std_nvfp4;
-        // PrismaQuant float-quantized / MXFP8: the weight is FP8E4M3 on disk,
-        // not UInt8 NVFP4-packed. Skip the costly quantized_any→dequant_nvfp4
-        // → fallback→dense_auto chain and go directly to dense_auto.
-        let is_fp8_weight = store.get(&format!("{prefix}.weight"))
+
+        // Guard 1: NVFP4 CT format uses weight_packed — no packed tensor means
+        // the weight is BF16/FP8/float-quantized. dense_auto handles all of those.
+        if store.get(&format!("{prefix}.weight_packed")).is_err() {
+            return dense_auto(store, &format!("{prefix}.weight"), gpu);
+        }
+
+        // Guard 2: MxFp8 variant always routes through MXFP8 dequant
+        // (dense_auto handles both packed and non-packed conventions).
+        // CompressedTensors may be NVFP4 or need further checks.
+        if matches!(variant, Nvfp4Variant::MxFp8) {
+            return dense_auto(store, &format!("{prefix}.weight"), gpu);
+        }
+
+        // Guard 3: only CompressedTensors variant remains (pure NVFP4).
+        // PrismaQuant float-quantized / MXFP8 stores FP8E4M3 in
+        // `.weight`, not UInt8 NVFP4-packed bytes. Route to dense_auto.
+        if !matches!(variant, Nvfp4Variant::CompressedTensors) {
+            return dense_auto(store, &format!("{prefix}.weight"), gpu);
+        }
+
+        // Guard 4: FP8E4M3 source under weight_packed? Route to MXFP8 dequant.
+        let is_fp8_src = store
+            .get(&format!("{prefix}.weight"))
             .map(|w| w.dtype == spark_runtime::weights::WeightDtype::FP8E4M3)
             .unwrap_or(false);
-        if matches!(
-            variant,
-            Nvfp4Variant::CompressedTensors | Nvfp4Variant::MxFp8
-        ) && has_nvfp4 && !is_fp8_weight
-        {
-            let Some(qctx) = qctx else {
-                anyhow::bail!(
-                    "load_ssm_qwen35: {proj_name} is NVFP4 on disk but no QuantizeCtx provided."
-                );
-            };
-            // Try NVFP4 dequant via quantized_any; if it falls back to
-            // Bf16Raw (per-key detection found no NVFP4 data), use the
-            // result directly. If dequant_nvfp4_to_bf16 fails, fall
-            // back to dense_auto.
-            let qw = quantized_any(store, &prefix, n, k, gpu, variant, qctx)?;
-            match dequant_nvfp4_to_bf16(store, &prefix, n, k, gpu) {
-                Ok(bf16) => {
-                    gpu.free(qw.weight)?;
-                    gpu.free(qw.weight_scale)?;
-                    Ok(bf16)
-                }
-                Err(_) => {
-                    // NVFP4 metadata tensors failed to load — fall back
-                    gpu.free(qw.weight)?;
-                    gpu.free(qw.weight_scale)?;
-                    tracing::warn!(
-                        "load_ssm_qwen35: {proj_name} NVFP4 dequant failed, falling back to dense_auto"
-                    );
-                    load_proj(&format!("{prefix}.weight"))
-                }
-            }
-        } else {
-            load_proj(&format!("{prefix}.weight"))
+        if is_fp8_src {
+            return dense_auto(store, &format!("{prefix}.weight"), gpu);
         }
+
+        // Confirmed: NVFP4 on disk. Dequant to BF16 directly from store.
+        dequant_nvfp4_to_bf16(store, &prefix, n, k, gpu)
     };
 
     Ok(SsmWeightsQwen35 {

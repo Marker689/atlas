@@ -15,8 +15,8 @@ use crate::layers::{DenseFfnLayer, FfnActivation, FfnComponent, Qwen3AttentionLa
 use crate::quant_format::detect_quant_format;
 use crate::tp_shard::{TpShardKind, shard_dense_bf16};
 use crate::weight_map::{
-    AttentionWeights, QuantizeCtx, dense, dense_auto, detect_nvfp4_variant, load_kv_scales,
-    quantize_to_nvfp4, quantized_any,
+    AttentionWeights, Nvfp4Variant, QuantizeCtx, dense, dense_auto, detect_nvfp4_variant,
+    load_kv_scales, quantize_to_nvfp4, quantized_any,
 };
 
 pub(super) fn load_layers_impl(
@@ -94,53 +94,48 @@ pub(super) fn load_layers_impl(
 
         // ── Attention weights ──
         // 31B: BF16 on disk (dense_auto). 26B MoE: NVFP4 on disk (dequant to BF16).
-        let attn_is_nvfp4 = store.contains(&format!("{p}.q_proj.weight_scale"));
-        let q_dense = if attn_is_nvfp4 {
-            use crate::weight_map::dequant_nvfp4_to_bf16;
-            dequant_nvfp4_to_bf16(store, &format!("{p}.q_proj"), q_out_dim, h, gpu)?
-        } else {
-            dense_auto(store, &format!("{p}.q_proj.weight"), gpu)?
+        // PrismaQuant mixed-precision: dispatch on layer_variant, not
+        // tensor-name sniffing — MXFP8 layers also have .weight_scale but
+        // must route through dequant_mxfp8_to_bf16, not dequant_nvfp4_to_bf16.
+        let load_attn_proj = |proj_name: &str, n: usize, k: usize| -> Result<DenseWeight> {
+            match layer_variant {
+                Nvfp4Variant::MxFp8 => {
+                    crate::weight_map::dequant_mxfp8_to_bf16(
+                        store, &format!("{p}.{proj_name}"), gpu,
+                    )
+                }
+                Nvfp4Variant::CompressedTensors => {
+                    crate::weight_map::dequant_nvfp4_to_bf16(
+                        store, &format!("{p}.{proj_name}"), n, k, gpu,
+                    )
+                }
+                _ => dense_auto(store, &format!("{p}.{proj_name}.weight"), gpu),
+            }
         };
-        let k_dense = if attn_is_nvfp4 {
-            use crate::weight_map::dequant_nvfp4_to_bf16;
-            dequant_nvfp4_to_bf16(store, &format!("{p}.k_proj"), kv_out_dim, h, gpu)?
-        } else {
-            dense_auto(store, &format!("{p}.k_proj.weight"), gpu)?
-        };
+        let q_dense = load_attn_proj("q_proj", q_out_dim, h)?;
+        let k_dense = load_attn_proj("k_proj", kv_out_dim, h)?;
         let v_key = format!("{p}.v_proj.weight");
-        let v_dense =
-            if store.contains(&v_key) || store.contains(&format!("{p}.v_proj.weight_scale")) {
-                if attn_is_nvfp4 {
-                    use crate::weight_map::dequant_nvfp4_to_bf16;
-                    dequant_nvfp4_to_bf16(store, &format!("{p}.v_proj"), kv_out_dim, h, gpu)?
-                } else {
-                    dense_auto(store, &v_key, gpu)?
-                }
-            } else {
-                k_dense // K=V: alias K as V
-            };
-        let o_dense = if attn_is_nvfp4 {
-            use crate::weight_map::dequant_nvfp4_to_bf16;
-            dequant_nvfp4_to_bf16(store, &format!("{p}.o_proj"), h, q_out_dim, gpu)?
+        let v_dense = if store.contains(&v_key)
+            || store.contains(&format!("{p}.v_proj.weight_scale"))
+            || store.contains(&format!("{p}.v_proj.weight_packed"))
+        {
+            load_attn_proj("v_proj", kv_out_dim, h)?
         } else {
+            k_dense // K=V: alias K as V
+        };
+        let o_dense = {
             let o_key = format!("{p}.o_proj.weight");
-            if store.contains(&o_key) {
-                dense_auto(store, &o_key, gpu)?
+            if store.contains(&o_key)
+                || store.contains(&format!("{p}.o_proj.weight_scale"))
+                || store.contains(&format!("{p}.o_proj.weight_packed"))
+            {
+                load_attn_proj("o_proj", h, q_out_dim)?
             } else {
-                // PrismaQuant export may omit o_proj.weight from safetensors
-                // for some layers. Check for NVFP4 packed variant as fallback.
-                let packed_key = format!("{p}.o_proj.weight_packed");
-                if store.contains(&packed_key) {
-                    tracing::warn!("Gemma-4 L{i}: {o_key} not found, using NVFP4 packed variant");
-                    use crate::weight_map::dequant_nvfp4_to_bf16;
-                    dequant_nvfp4_to_bf16(store, &format!("{p}.o_proj"), h, q_out_dim, gpu)?
-                } else {
-                    anyhow::bail!(
-                        "Gemma-4 L{i}: {o_key} not found in store and no packed variant available. \
-                         This PrismaQuant checkpoint has a stripped o_proj tensor — \
-                         the model cannot load this layer."
-                    );
-                }
+                anyhow::bail!(
+                    "Gemma-4 L{i}: {o_key} not found in store and no packed variant available. \
+                     This PrismaQuant checkpoint has a stripped o_proj tensor — \
+                     the model cannot load this layer."
+                );
             }
         };
         if is_full_attn {
@@ -345,7 +340,7 @@ pub(super) fn load_layers_impl(
             config.intermediate_size,
             h,
             gpu,
-            variant,
+            layer_variant,
             qctx,
         )?;
         let up_proj = quantized_any(
@@ -354,7 +349,7 @@ pub(super) fn load_layers_impl(
             config.intermediate_size,
             h,
             gpu,
-            variant,
+            layer_variant,
             qctx,
         )?;
         let down_proj = quantized_any(
@@ -363,7 +358,7 @@ pub(super) fn load_layers_impl(
             h,
             config.intermediate_size,
             gpu,
-            variant,
+            layer_variant,
             qctx,
         )?;
         let ffn_weights = DenseFfnWeights {

@@ -289,17 +289,11 @@ impl ModelWeightLoader for Qwen35DenseWeightLoader {
                         let out = load_ssm_projection("out_proj", h, value_dim)?;
                         (qkv, z, out)
                     } else {
-                        let qctx = crate::weight_map::QuantizeCtx {
-                            absmax_k,
-                            quantize_k,
-                            stream,
-                        };
                         let ssm35 = load_ssm_qwen35(
                             store,
                             &lp,
                             gpu,
                             layer_variant,
-                            Some(qctx),
                             h,
                             qkv_rows,
                             z_rows,
@@ -402,16 +396,12 @@ impl ModelWeightLoader for Qwen35DenseWeightLoader {
                     // out_proj; the BF16 qkvz_dense / out_proj_dense were only quantize
                     // inputs. Free them rather than keep a third full-precision copy of
                     // the largest SSM tensor across every layer (Atlas issue #A1).
-                    // MXFP8-sourced SSM: keep both qkvz and out_proj in BF16 for decode.
-                    let keep_bf16 = matches!(layer_variant, Nvfp4Variant::MxFp8);
-                    if !keep_bf16 {
-                        gpu.free(qkvz_dense.weight)?;
-                        gpu.free(out_proj_dense.weight)?;
-                    }
+                    gpu.free(qkvz_dense.weight)?;
+                    gpu.free(out_proj_dense.weight)?;
 
                     let ssm = SsmWeights {
-                        in_proj_qkvz: if keep_bf16 { qkvz_dense } else {
-                            DenseWeight { weight: spark_runtime::gpu::DevicePtr::NULL }
+                        in_proj_qkvz: DenseWeight {
+                            weight: spark_runtime::gpu::DevicePtr::NULL,
                         },
                         in_proj_ba: ba_dense,
                         conv1d,
@@ -426,16 +416,12 @@ impl ModelWeightLoader for Qwen35DenseWeightLoader {
                         ssm,
                         post_attn_norm,
                         ffn,
-                        if keep_bf16 { None } else { Some(qkvz_nvfp4) },
-                        if keep_bf16 { None } else { Some(qkvz_nvfp4_t) },
+                        Some(qkvz_nvfp4),
+                        Some(qkvz_nvfp4_t),
                         Some(out_proj_nvfp4_t),
                         config,
                         gpu,
-                    )?;
-                    if keep_bf16 {
-                        layer.out_proj_dense = Some(out_proj_dense);
-                        layer.disable_gdn_f32();
-                    }
+                    )?
                     layer.predequant_for_prefill(gpu, config, stream)?;
                     // Install the FP8 prefill weights AFTER `predequant_for_prefill`
                     // (which sets `out_proj_fp8` from NVFP4 + scale2). The

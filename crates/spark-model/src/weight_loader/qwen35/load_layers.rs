@@ -85,13 +85,15 @@ pub(super) fn load_layers(
 
     // Resolve runtime quantization format from the detected on-disk
     // variant. This determines which kernels are used for
-    // decode/prefill/verify.
+    // decode/prefill/verify. For mixed-precision PrismaQuant checkpoints,
+    // the per-layer variant (from config_groups) is authoritative — see
+    // the per-loop recomputation below.
     let quant_format_runtime = if variant == Nvfp4Variant::Fp8Dequanted {
         QuantFormat::Fp8
     } else {
         QuantFormat::Nvfp4
     };
-    let native_fp8 = quant_format_runtime == QuantFormat::Fp8;
+    let native_fp8_global = quant_format_runtime == QuantFormat::Fp8;
     tracing::info!(
         "Weight format: {:?}, NVFP4 variant: {:?}, quant_format: {:?}",
         weight_format,
@@ -136,6 +138,9 @@ pub(super) fn load_layers(
         if layer_variant != variant {
             tracing::info!("Layer {i}: per-layer variant {layer_variant:?} (global: {variant:?})");
         }
+        // Recompute native_fp8 per-layer: a mixed-precision PrismaQuant
+        // checkpoint may have per-layer variant overrides (config_groups).
+        let native_fp8 = layer_variant == Nvfp4Variant::Fp8Dequanted;
 
         // When native_fp8, skip NVFP4 routed experts — FP8 fused batch1/2/3
         // kernels handle all MoE dispatch including MTP verify.

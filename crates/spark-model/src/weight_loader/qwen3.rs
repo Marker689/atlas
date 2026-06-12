@@ -67,11 +67,11 @@ impl ModelWeightLoader for Qwen3WeightLoader {
         } else {
             QuantFormat::Nvfp4
         };
-        let native_fp8 = quant_format_runtime == QuantFormat::Fp8;
+        let native_fp8_global = quant_format_runtime == QuantFormat::Fp8;
         tracing::info!(
             "Qwen3 weight variant: {:?}, native_fp8: {}",
             variant,
-            native_fp8
+            native_fp8_global
         );
 
         let h = config.hidden_size;
@@ -105,6 +105,7 @@ impl ModelWeightLoader for Qwen3WeightLoader {
             let post_attn_norm = dense(store, &format!("{lp}.post_attention_layernorm.weight"))?;
 
             let layer_variant = quant_format.variant_for(&lp);
+            let native_fp8 = layer_variant == Nvfp4Variant::Fp8Dequanted;
 
             // ── MoE weights ──
             let moe_weights = if native_fp8 {

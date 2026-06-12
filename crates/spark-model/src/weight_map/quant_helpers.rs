@@ -142,8 +142,11 @@ pub(crate) fn dense_auto(
             if store.contains(&format!("{prefix}.weight_scale_inv")) {
                 dequant_fp8_blockscaled_to_bf16(store, prefix, gpu)
             } else if store.contains(&format!("{prefix}.weight_packed")) {
-                // NVFP4 compressed-tensors: this is a packed weight, not FP8
-                dequant_fp8_to_bf16(store, prefix, gpu)
+                anyhow::bail!(
+                    "{prefix}: FP8E4M3 .weight with .weight_packed is ambiguous — \
+                     caller should route through CompressedTensors path or drop \
+                     the .weight_packed tensor"
+                )
             } else {
                 // Distinguish MXFP8 (uint8 E8M0 per-group, shape [N, K/32])
                 // from float-quantized (FP32 per-channel, shape [N, 1]).

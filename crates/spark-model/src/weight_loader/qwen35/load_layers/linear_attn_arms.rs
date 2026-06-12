@@ -143,7 +143,7 @@ pub(super) fn build_linear_attention_fp8(
     let qkv_size = config.ssm_qkv_size();
     let z_size = config.ssm_z_size();
     let value_dim = config.linear_num_value_heads * config.linear_value_head_dim;
-    let ssm35 = load_ssm_qwen35(store, lp, gpu, variant, None, h, qkv_size, z_size, value_dim)?;
+    let ssm35 = load_ssm_qwen35(store, lp, gpu, variant, h, qkv_size, z_size, value_dim)?;
     let qkvz_dense = gpu_concat_rows(
         &ssm35.in_proj_qkv,
         qkv_size,
@@ -248,17 +248,11 @@ pub(super) fn build_linear_attention_nvfp4(
     post_attn_norm: DenseWeight,
     ffn: FfnComponent,
 ) -> Result<Box<dyn TransformerLayer>> {
-    let qctx_nvfp4 = crate::weight_map::QuantizeCtx {
-        absmax_k,
-        quantize_k,
-        stream,
-    };
     let ssm35 = load_ssm_qwen35(
         store,
         lp,
         gpu,
         variant,
-        Some(qctx_nvfp4),
         h,
         config.ssm_qkv_size(),
         config.ssm_z_size(),
@@ -366,22 +360,17 @@ pub(super) fn build_linear_attention_nvfp4(
         out_proj: out_proj_nvfp4,
     };
 
-    let is_mxfp8 = matches!(variant, Nvfp4Variant::MxFp8);
     let mut layer = Qwen3SsmLayer::new_sequential(
         input_norm,
         ssm,
         post_attn_norm,
         ffn,
-        if is_mxfp8 { None } else { Some(qkvz_nvfp4) },
-        if is_mxfp8 { None } else { Some(qkvz_nvfp4_t) },
+        Some(qkvz_nvfp4),
+        Some(qkvz_nvfp4_t),
         Some(out_proj_nvfp4_t),
         config,
         gpu,
     )?;
-    if is_mxfp8 {
-        layer.out_proj_dense = Some(ssm35.out_proj);
-        layer.disable_gdn_f32();
-    }
     layer.predequant_for_prefill(gpu, config, stream)?;
     // Install native FP8 prefill weights AFTER `predequant_for_prefill`
     // (which sets `out_proj_fp8` from NVFP4 + scale2). The FP8 path

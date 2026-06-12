@@ -318,9 +318,14 @@ pub(crate) fn quantized_any(
             let result = quantize_to_nvfp4(
                 &bf16, n, k, gpu,
                 qctx.absmax_k, qctx.quantize_k, qctx.stream,
-            )?;
-            gpu.free(bf16.weight)?;
-            Ok(result)
+            );
+            // Free intermediate BF16 before checking result — prevents leak
+            // if quantize_to_nvfp4 fails (bf16.weight was allocated by the
+            // dequant step above).
+            if let Err(e) = gpu.free(bf16.weight) {
+                tracing::warn!("quantized_any FP8: gpu.free failed for {prefix}: {e:#}");
+            }
+            result
         }
         Nvfp4Variant::MxFp8 => {
             // MXFP8: dequant to BF16, then runtime-quantize to NVFP4.
@@ -339,9 +344,11 @@ pub(crate) fn quantized_any(
                 qctx.absmax_k,
                 qctx.quantize_k,
                 qctx.stream,
-            )?;
-            gpu.free(bf16.weight)?;
-            Ok(result)
+            );
+            if let Err(e) = gpu.free(bf16.weight) {
+                tracing::warn!("quantized_any MXFP8: gpu.free failed for {prefix}: {e:#}");
+            }
+            result
         }
         Nvfp4Variant::Bf16Raw => {
             // Raw BF16/FP32 fine-tune: load the dense weight then runtime-quantize.
@@ -358,12 +365,16 @@ pub(crate) fn quantized_any(
                 qctx.absmax_k,
                 qctx.quantize_k,
                 qctx.stream,
-            )?;
+            );
             if source_dtype != WeightDtype::BF16 {
-                gpu.free(bf16.weight)?;
-                gpu.free(source_ptr)?;
+                if let Err(e) = gpu.free(bf16.weight) {
+                    tracing::warn!("quantized_any BF16: gpu.free(bf16) failed for {prefix}: {e:#}");
+                }
+                if let Err(e) = gpu.free(source_ptr) {
+                    tracing::warn!("quantized_any BF16: gpu.free(source) failed for {prefix}: {e:#}");
+                }
             }
-            Ok(result)
+            result
         }
     }
 }
@@ -382,10 +393,11 @@ pub(crate) fn quantized_from_fp8(
     stream: u64,
 ) -> Result<QuantizedWeight> {
     let bf16 = dequant_fp8_blockscaled_to_bf16(store, prefix, gpu)?;
-    let result = quantize_to_nvfp4(&bf16, n, k, gpu, absmax_k, quantize_k, stream)?;
-    // Free the BF16 intermediate — only the NVFP4 result is needed.
-    gpu.free(bf16.weight)?;
-    Ok(result)
+    let result = quantize_to_nvfp4(&bf16, n, k, gpu, absmax_k, quantize_k, stream);
+    if let Err(e) = gpu.free(bf16.weight) {
+        tracing::warn!("quantized_from_fp8: gpu.free failed for {prefix}: {e:#}");
+    }
+    result
 }
 
 /// Load FP8 block-scaled weight as BF16 dense (no NVFP4 re-quantization).
