@@ -151,8 +151,11 @@ extern "C" __global__ void gated_delta_rule_decode(
             H[(j + 1) * v_dim + tid] = h1;
             H[(j + 2) * v_dim + tid] = h2;
             H[(j + 3) * v_dim + tid] = h3;
-            q_dot += h0 * smem_q[j] + h1 * smem_q[j + 1]
-                   + h2 * smem_q[j + 2] + h3 * smem_q[j + 3];
+            float y, t;
+            y = h0 * smem_q[j] - q_c;     t = q_dot + y;  q_c = (t - q_dot) - y;  q_dot = t;
+            y = h1 * smem_q[j + 1] - q_c;   t = q_dot + y;  q_c = (t - q_dot) - y;  q_dot = t;
+            y = h2 * smem_q[j + 2] - q_c;   t = q_dot + y;  q_c = (t - q_dot) - y;  q_dot = t;
+            y = h3 * smem_q[j + 3] - q_c;   t = q_dot + y;  q_c = (t - q_dot) - y;  q_dot = t;
         }
 
         // ── SSM state normalization (Stuffed Mamba mitigation) ──
@@ -256,18 +259,24 @@ extern "C" __global__ void gated_delta_rule_decode_f32(
 
     float v_i = (float)v_ptr[tid];
     float hk_dot = 0.0f;
+    float hk_c = 0.0f;
     #pragma unroll 4
     for (unsigned int j = 0; j < k_dim; j += 4) {
         float h0 = H[(j + 0) * v_dim + tid];
         float h1 = H[(j + 1) * v_dim + tid];
         float h2 = H[(j + 2) * v_dim + tid];
         float h3 = H[(j + 3) * v_dim + tid];
-        hk_dot += h0 * smem_k[j] + h1 * smem_k[j+1] + h2 * smem_k[j+2] + h3 * smem_k[j+3];
+        float y, t;
+        y = h0 * smem_k[j] - hk_c;  t = hk_dot + y;  hk_c = (t - hk_dot) - y;  hk_dot = t;
+        y = h1 * smem_k[j+1] - hk_c; t = hk_dot + y;  hk_c = (t - hk_dot) - y; hk_dot = t;
+        y = h2 * smem_k[j+2] - hk_c; t = hk_dot + y;  hk_c = (t - hk_dot) - y; hk_dot = t;
+        y = h3 * smem_k[j+3] - hk_c; t = hk_dot + y;  hk_c = (t - hk_dot) - y; hk_dot = t;
     }
 
     float v_new_i = (v_i - g * hk_dot) * bt;
 
     float q_dot = 0.0f;
+    float q_c = 0.0f;
     #pragma unroll 4
     for (unsigned int j = 0; j < k_dim; j += 4) {
         float h0 = H[(j + 0) * v_dim + tid];
@@ -282,7 +291,11 @@ extern "C" __global__ void gated_delta_rule_decode_f32(
         H[(j + 1) * v_dim + tid] = h1;
         H[(j + 2) * v_dim + tid] = h2;
         H[(j + 3) * v_dim + tid] = h3;
-        q_dot += h0 * smem_q[j] + h1 * smem_q[j+1] + h2 * smem_q[j+2] + h3 * smem_q[j+3];
+        float y, t;
+        y = h0 * smem_q[j] - q_c;     t = q_dot + y;  q_c = (t - q_dot) - y;  q_dot = t;
+        y = h1 * smem_q[j+1] - q_c;   t = q_dot + y;  q_c = (t - q_dot) - y;  q_dot = t;
+        y = h2 * smem_q[j+2] - q_c;   t = q_dot + y;  q_c = (t - q_dot) - y;  q_dot = t;
+        y = h3 * smem_q[j+3] - q_c;   t = q_dot + y;  q_c = (t - q_dot) - y;  q_dot = t;
     }
 
     #ifdef SSM_STATE_NORM_ENABLED
@@ -574,7 +587,8 @@ extern "C" __global__ void gated_delta_rule_prefill(
         if (tid < v_dim) {
             float v_i = (float)v_t[tid];
 
-            float hk_dot = 0.0f;
+        float hk_dot = 0.0f;
+        float hk_c = 0.0f;
             #pragma unroll 4
             for (unsigned int j = 0; j < k_dim; j += 4) {
                 hk_dot += H_smem[(j + 0) * v_dim + tid] * smem_k[j]
@@ -596,7 +610,11 @@ extern "C" __global__ void gated_delta_rule_prefill(
                 H_smem[(j + 1) * v_dim + tid] = h1;
                 H_smem[(j + 2) * v_dim + tid] = h2;
                 H_smem[(j + 3) * v_dim + tid] = h3;
-                q_dot += h0 * smem_q[j] + h1 * smem_q[j + 1]
+                float y, t;
+            y = h0 * smem_q[j] - q_c;     t = q_dot + y;  q_c = (t - q_dot) - y;  q_dot = t;
+            y = h1 * smem_q[j + 1] - q_c;   t = q_dot + y;  q_c = (t - q_dot) - y;  q_dot = t;
+            y = h2 * smem_q[j + 2] - q_c;   t = q_dot + y;  q_c = (t - q_dot) - y;  q_dot = t;
+            y = h3 * smem_q[j + 3] - q_c;   t = q_dot + y;  q_c = (t - q_dot) - y;  q_dot = t;
                        + h2 * smem_q[j + 2] + h3 * smem_q[j + 3];
             }
 
